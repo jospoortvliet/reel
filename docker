@@ -1,0 +1,2 @@
+bash: exec: -i: invalid option
+exec: usage: exec [-cl] [-a name] file [redirection ...]

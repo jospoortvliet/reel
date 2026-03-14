@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	  xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+	<id>reel</id>
+	<name>Reel</name>
+	<summary>Automatic highlight video generator for Memories app</summary>
+	<description>This automatic highlight video generator creates short videos from your photos and videos, with the option of some manual changes. It scans your Nextcloud Memories library, groups images and videos based on location and time, selects the best moments, and assembles them into a shareable highlight clip.
+
+What it does
+* 📸 Scans your media library
+Looks through photos and videos stored in Nextcloud.
+* 🧠 Groups related media together
+Uses timestamps and metadata to group moments from the same event (trip, party, day out, etc.).
+* ⭐ Finds the best moments
+Detects visually interesting shots, bursts, short clips, and memorable moments.
+* 🎬 Automatically creates a highlight video
+Combines selected photos and videos into a short cinematic montage.
+* 🎵 Adds music and transitions
+Generates a smooth video with basic cuts, fades, and optional background music.
+* 📱 Ready to share instantly
+Outputs a short highlight video you can save, download, or share.
+
+Why it’s useful
+* ⏱ No manual editing required – the app builds the video automatically.
+* 📂 Works directly with your existing Nextcloud library – no uploads to third-party services.
+* 🔒 Self-hosted and private – your media stays on your server.
+* 🎞 Turns large photo collections into something watchable – instead of scrolling through hundreds of images.
+
+Example use cases
+* 🏖 Trip recap videos from vacation photos
+* 🎉 Event highlights from birthdays, weddings, or parties
+* 👨‍👩‍👧 Family memories automatically summarized
+* 📅 Daily or yearly highlights from your photo archive</description>
+	<version>1.0.0</version>
+	<licence>AGPL-3.0-or-later</licence>
+	<author mail="hello@jospoortvliet.com" homepage="https://jospoortvliet.com">Jos Poortvliet</author>
+	<namespace>Reel</namespace>
+	<category>multimedia</category>
+	<bugs>https://github.com/jospoortvliet</bugs>
+	<dependencies>
+		<nextcloud min-version="34" max-version="34"/>
+	</dependencies>
+	<navigations>
+		<navigation>
+			<id>reel</id>
+			<name>Reel</name>
+			<route>reel.page.index</route>
+			<icon>app.svg</icon>
+			<type>link</type>
+		</navigation>
+	</navigations>
+	<commands>
+		<command>OCA\Reel\Command\DetectEvents</command>
+		<command>OCA\Reel\Command\RenderEvent</command>
+		<command>OCA\Reel\Command\DebugDuplicates</command>
+	</commands>
+</info>

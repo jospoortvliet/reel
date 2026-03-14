@@ -1,0 +1,16 @@
+/.idea/
+/*.iml
+
+/vendor/
+/vendor-bin/*/vendor/
+
+/.php-cs-fixer.cache
+/tests/.phpunit.cache
+
+# macOS / filesystem noise
+.DS_Store
+._*
+
+/node_modules/
+/js/
+/css/
