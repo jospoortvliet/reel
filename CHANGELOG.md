@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-03-14
+
+### Fixed
+
+- Installation failure on Nextcloud 30–33: migration used `BOOLEAN NOT NULL` which triggers a schema validator error on those versions. Changed to `SMALLINT` (functionally identical).
+
+### Changed
+
+- Lowered `min-version` from 34 to 30. The app has no API dependency on NC 33 or 34; it works on NC 30 and newer, including NC 32 (AIO) and NC 33.
+
 ## [1.1.1] - 2026-03-14
 
 ### Added

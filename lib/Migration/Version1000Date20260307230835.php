@@ -90,9 +90,10 @@ class Version1000Date20260307230835 extends SimpleMigrationStep {
             $table->addColumn('file_id', Types::BIGINT, [
                 'notnull' => true,
             ]);
-            $table->addColumn('included', Types::BOOLEAN, [
-                'notnull' => true,
-                'default' => 1,
+            $table->addColumn('included', Types::SMALLINT, [
+                'notnull'  => true,
+                'unsigned' => true,
+                'default'  => 1,
             ]);
             $table->addColumn('sort_order', Types::INTEGER, [
                 'notnull' => true,
