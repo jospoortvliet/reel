@@ -17,3 +17,12 @@
 /css/
 
 /.vscode/
+
+# Nextcloud app signing material (never commit)
+/.nextcloud/
+/certificates/
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
