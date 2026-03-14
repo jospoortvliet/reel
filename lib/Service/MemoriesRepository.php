@@ -190,16 +190,20 @@ class MemoriesRepository {
             return [];
         }
 
-        $qb = $this->db->getQueryBuilder();
-        $qb->select('mp.fileid', 'pl.name', 'pl.admin_level')
-            ->from('memories_places', 'mp')
-            ->innerJoin('mp', 'memories_planet', 'pl', $qb->expr()->eq('mp.osm_id', 'pl.osm_id'))
-            ->where($qb->expr()->in('mp.fileid', $qb->createNamedParameter($fileIds, IQueryBuilder::PARAM_INT_ARRAY)))
-            ->orderBy('pl.admin_level', 'DESC');
+        // PostgreSQL limits bind parameters to 65535 per query; chunk to stay safe.
+        $rows = [];
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('mp.fileid', 'pl.name', 'pl.admin_level')
+                ->from('memories_places', 'mp')
+                ->innerJoin('mp', 'memories_planet', 'pl', $qb->expr()->eq('mp.osm_id', 'pl.osm_id'))
+                ->where($qb->expr()->in('mp.fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->orderBy('pl.admin_level', 'DESC');
 
-        $result = $qb->executeQuery();
-        $rows = $result->fetchAll();
-        $result->closeCursor();
+            $result = $qb->executeQuery();
+            $rows = array_merge($rows, $result->fetchAll());
+            $result->closeCursor();
+        }
 
         $placeMap = [];
         foreach ($rows as $row) {

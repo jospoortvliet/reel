@@ -315,8 +315,10 @@ class DuplicateFilterService {
 
     private function loadPhotos(int $eventId, string $userId): array {
         $qb = $this->db->getQueryBuilder();
+        // Use mem.epoch (integer Unix timestamp) instead of UNIX_TIMESTAMP(mem.datetaken)
+        // which is MySQL-specific. Memories stores the epoch as a plain integer column.
         $qb->select('m.file_id', 'fc.name')
-            ->selectAlias($qb->createFunction('UNIX_TIMESTAMP(mem.datetaken)'), 'datetaken')
+            ->selectAlias('mem.epoch', 'datetaken')
             ->from('reel_event_media', 'm')
             ->join('m', 'memories', 'mem', $qb->expr()->eq('m.file_id', 'mem.fileid'))
             ->join('m', 'filecache', 'fc',  $qb->expr()->eq('m.file_id', 'fc.fileid'))
@@ -330,11 +332,9 @@ class DuplicateFilterService {
 
     private function loadBlurhashes(array $fileIds): array {
         $qb = $this->db->getQueryBuilder();
-        $qb->select('file_id')
-            ->selectAlias(
-                $qb->createFunction("JSON_UNQUOTE(JSON_EXTRACT(json, '$.blurhash.value'))"),
-                'blurhash'
-            )
+        // Select entire json column and parse in PHP to avoid MySQL-specific
+        // JSON_UNQUOTE / JSON_EXTRACT functions (not available on PostgreSQL).
+        $qb->select('file_id', 'json')
             ->from('files_metadata')
             ->where($qb->expr()->in(
                 'file_id',
@@ -343,8 +343,10 @@ class DuplicateFilterService {
 
         $result = [];
         foreach ($qb->executeQuery()->fetchAll() as $row) {
-            if (!empty($row['blurhash'])) {
-                $result[(int)$row['file_id']] = $row['blurhash'];
+            $data = json_decode($row['json'] ?? '{}', true);
+            $blurhash = $data['blurhash']['value'] ?? null;
+            if (!empty($blurhash)) {
+                $result[(int)$row['file_id']] = $blurhash;
             }
         }
         return $result;

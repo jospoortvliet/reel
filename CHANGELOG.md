@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-03-14
+
+### Fixed
+
+- PostgreSQL: `UNIX_TIMESTAMP(mem.datetaken)` is MySQL-specific. Changed to select `mem.epoch` directly (Memories stores it as a plain integer Unix timestamp).
+- PostgreSQL: `JSON_UNQUOTE(JSON_EXTRACT(...))` used to extract blurhash from `oc_files_metadata` is MySQL-specific. Now selects the raw `json` column and parses it in PHP.
+- PostgreSQL: `MemoriesRepository::loadPlaceNames()` sent all file IDs as a single `IN (...)` bind array, hitting the 65535-parameter limit for users with large libraries. Now chunked into batches of 1000 (same fix as 1.1.3 for EventDetectionService).
+
 ## [1.1.3] - 2026-03-14
 
 ### Fixed
