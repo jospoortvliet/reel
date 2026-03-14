@@ -175,6 +175,16 @@ This repository now includes an automated release workflow at [.github/workflows
 - Generates checksums (`reel-<version>.sha256`)
 - Uploads artifacts to the workflow run
 - Publishes them to a GitHub Release when triggered by a tag (`v*`)
+- Optionally signs/publishes to the Nextcloud App Store when release secrets are configured
+
+### App Store signing and upload
+
+If these repository secrets are present, the same release workflow also publishes the signed app to the Nextcloud App Store:
+
+- `APPSTORE_TOKEN`: API token from apps.nextcloud.com
+- `APP_PRIVATE_KEY`: private key for your app certificate
+
+If the secrets are not set, the workflow still builds and publishes GitHub release assets, and simply skips the App Store step.
 
 ### How to cut a release
 

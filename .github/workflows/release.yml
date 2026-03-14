@@ -12,12 +12,24 @@ permissions:
 jobs:
   build-release:
     runs-on: ubuntu-latest
+    env:
+      APP_NAME: reel
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve release version
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -z "$VERSION" || "$VERSION" == "$GITHUB_REF_NAME" ]]; then
+            VERSION="$(grep -oPm1 '(?<=<version>)[^<]+' appinfo/info.xml)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Read package.json node and npm engines version
         uses: skjnldsv/read-package-engines-version-actions@v3
@@ -56,12 +68,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          APP_ID="reel"
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          if [[ -z "$VERSION" || "$VERSION" == "$GITHUB_REF_NAME" ]]; then
-            VERSION="$(grep -oPm1 '(?<=<version>)[^<]+' appinfo/info.xml)"
-          fi
+          APP_ID="$APP_NAME"
+          VERSION="${{ steps.meta.outputs.version }}"
 
           BUILD_ROOT="build/release"
           STAGE_DIR="$BUILD_ROOT/stage"
@@ -105,3 +113,13 @@ jobs:
             build/release/*.tar.gz
             build/release/*.zip
             build/release/*.sha256
+
+      - name: Publish signed release to Nextcloud App Store
+        if: startsWith(github.ref, 'refs/tags/v') && secrets.APPSTORE_TOKEN != '' && secrets.APP_PRIVATE_KEY != ''
+        uses: R0Wi/nextcloud-appstore-push-action@v1.0.4
+        with:
+          app_name: ${{ env.APP_NAME }}
+          appstore_token: ${{ secrets.APPSTORE_TOKEN }}
+          download_url: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.APP_NAME }}-${{ steps.meta.outputs.version }}.tar.gz
+          app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+          nightly: false
