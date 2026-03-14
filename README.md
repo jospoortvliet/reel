@@ -130,6 +130,66 @@ php occ reel:debug-duplicates <event-id> <user-id>
 
 This prints a dry-run report showing which photos were identified as burst duplicates, which one would be kept, and why (face score, sharpness, or position).
 
+## Development setup
+
+You can contribute using the standard Nextcloud Docker setup (including Julius's dev image/workflow). A custom image is optional, not required.
+
+### Quick local checks
+
+From the app root:
+
+```bash
+composer install
+npm ci
+npm run build
+vendor/bin/phpunit --configuration tests/phpunit.xml
+```
+
+### Running commands in a Nextcloud container
+
+If your Nextcloud container is called `master-nextcloud-1`, run:
+
+```bash
+docker exec -u www-data -it master-nextcloud-1 php occ app:enable reel
+docker exec -u www-data -it master-nextcloud-1 php occ reel:detect-events --user=<uid>
+docker exec -u www-data -it master-nextcloud-1 php occ reel:render-event <event-id> <uid> --debug
+```
+
+### FFmpeg and Imagick
+
+For Reel to fully work in a test instance, make sure FFmpeg 7.x and PHP Imagick are installed in the running Nextcloud environment.
+If your base image does not include them, install them in your dev setup before testing rendering.
+
+
+## Release workflow
+
+This repository now includes an automated release workflow at [.github/workflows/release.yml](.github/workflows/release.yml).
+
+### What it does
+
+- Builds frontend assets (`npm ci && npm run build`)
+- Installs production PHP dependencies (`composer install --no-dev`)
+- Packages installable archives:
+	- `reel-<version>.tar.gz`
+	- `reel-<version>.zip`
+- Generates checksums (`reel-<version>.sha256`)
+- Uploads artifacts to the workflow run
+- Publishes them to a GitHub Release when triggered by a tag (`v*`)
+
+### How to cut a release
+
+```bash
+git checkout main
+git pull
+# bump versions + changelog
+git commit -am "Release x.y.z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push
+git push origin vX.Y.Z
+```
+
+Tag push triggers the workflow and publishes the release archives automatically.
+
 
 ## Technical overview
 

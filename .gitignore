@@ -12,6 +12,7 @@
 ._*
 
 /node_modules/
+/build/
 /js/
 /css/
 

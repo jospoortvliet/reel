@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read package.json node and npm engines version
+        uses: skjnldsv/read-package-engines-version-actions@v3
+        id: versions
+        with:
+          fallbackNode: '^20'
+          fallbackNpm: '^10'
+
+      - name: Set up node ${{ steps.versions.outputs.nodeVersion }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.versions.outputs.nodeVersion }}
+
+      - name: Set up npm ${{ steps.versions.outputs.npmVersion }}
+        run: npm i -g "npm@${{ steps.versions.outputs.npmVersion }}"
+
+      - name: Set up php
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, dom, curl, fileinfo, gd, intl, openssl, sqlite, pdo_sqlite, zip
+          coverage: none
+
+      - name: Install frontend dependencies and build assets
+        env:
+          CYPRESS_INSTALL_BINARY: 0
+          PUPPETEER_SKIP_DOWNLOAD: true
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install production PHP dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+
+          APP_ID="reel"
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          if [[ -z "$VERSION" || "$VERSION" == "$GITHUB_REF_NAME" ]]; then
+            VERSION="$(grep -oPm1 '(?<=<version>)[^<]+' appinfo/info.xml)"
+          fi
+
+          BUILD_ROOT="build/release"
+          STAGE_DIR="$BUILD_ROOT/stage"
+          APP_DIR="$STAGE_DIR/$APP_ID"
+
+          rm -rf "$BUILD_ROOT"
+          mkdir -p "$APP_DIR"
+
+          rsync -a ./ "$APP_DIR/" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'build/' \
+            --exclude 'node_modules/' \
+            --exclude 'src/' \
+            --exclude 'tests/' \
+            --exclude 'vendor-bin/' \
+            --exclude '.vscode/' \
+            --exclude '.idea/' \
+            --exclude '*.iml' \
+            --exclude '.DS_Store' \
+            --exclude '._*'
+
+          tar -czf "$BUILD_ROOT/${APP_ID}-${VERSION}.tar.gz" -C "$STAGE_DIR" "$APP_ID"
+          (cd "$STAGE_DIR" && zip -qr "../${APP_ID}-${VERSION}.zip" "$APP_ID")
+          (cd "$BUILD_ROOT" && shasum -a 256 "${APP_ID}-${VERSION}.tar.gz" "${APP_ID}-${VERSION}.zip" > "${APP_ID}-${VERSION}.sha256")
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-release-artifacts
+          path: |
+            build/release/*.tar.gz
+            build/release/*.zip
+            build/release/*.sha256
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/release/*.tar.gz
+            build/release/*.zip
+            build/release/*.sha256
