@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.6] - 2026-03-15
+
+### Fixed
+
+- Security: `updateEventVideoFileId()` in `VideoRenderingService` was missing a `user_id` WHERE clause, allowing a race-condition path to update another user's event record. Added the ownership check.
+- Security: `ApiController` and `SettingsController` methods now return HTTP 401 when `$userId` is null (defensive guard; framework normally prevents unauthenticated calls reaching these endpoints).
+- Robustness: `cleanupTempDir()` called `foreach` on the return value of `glob()`, which returns `false` on error instead of an empty array, causing a TypeError. Added `?: []` fallback.
+- Robustness: `buildOutputFilename()` now caps the slug at 80 characters to prevent filenames that exceed the OS 255-byte limit for very long event titles.
+- Robustness: The temporary render directory now uses `uniqid('', true)` instead of `time()` as its suffix, eliminating the collision risk when two renders start within the same second.
+- Robustness: FFmpeg stderr output is now truncated to 4 000 characters before being written to the `error` column, preventing DB write failures caused by oversized values.
+- Performance: `listEvents()` previously fired one job-status query per event (N+1). Added `RenderJobService::getLatestForEvents()` to batch-load all job statuses in a single query.
+- Correctness: `updateEvent()` now returns the current event unchanged (without touching `updated_at`) when no fields are supplied, instead of firing a no-op UPDATE.
+- Docs: README corrected minimum Nextcloud version from 34 to 30.
+
 ## [1.1.5] - 2026-03-14
 
 ### Fixed

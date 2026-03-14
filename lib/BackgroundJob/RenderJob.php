@@ -88,7 +88,7 @@ class RenderJob extends QueuedJob {
             ->set('updated_at', $qb->createNamedParameter(time(),      IQueryBuilder::PARAM_INT));
 
         if ($error !== null) {
-            $qb->set('error', $qb->createNamedParameter($error));
+            $qb->set('error', $qb->createNamedParameter(mb_substr($error, 0, 4000)));
         }
 
         $qb->where($qb->expr()->eq('id', $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT)))

@@ -48,6 +48,35 @@ class RenderJobService {
     }
 
     /**
+     * Get the most recent job for each of the given event IDs.
+     * Returns an array keyed by event_id.
+     */
+    public function getLatestForEvents(array $eventIds, string $userId): array {
+        if (empty($eventIds)) {
+            return [];
+        }
+
+        $jobs = [];
+        foreach (array_chunk($eventIds, 1000) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('*')
+                ->from('reel_jobs')
+                ->where($qb->expr()->in('event_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+                ->orderBy('created_at', 'DESC');
+
+            foreach ($qb->executeQuery()->fetchAll() as $row) {
+                $eid = (int)$row['event_id'];
+                if (!isset($jobs[$eid])) {
+                    $jobs[$eid] = $row; // first seen = most recent (DESC order)
+                }
+            }
+        }
+
+        return $jobs;
+    }
+
+    /**
      * Get the most recent job for an event.
      */
     public function getLatestForEvent(int $eventId, string $userId): ?array {

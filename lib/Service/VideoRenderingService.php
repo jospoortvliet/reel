@@ -81,7 +81,7 @@ class VideoRenderingService {
             throw new \RuntimeException("Could not resolve enough media paths for event {$eventId}");
         }
 
-        $tempDir = sys_get_temp_dir() . '/reel_' . $eventId . '_' . time();
+        $tempDir = sys_get_temp_dir() . '/reel_' . $eventId . '_' . uniqid('', true);
         mkdir($tempDir, 0700, true);
         $renderSucceeded = false;
 
@@ -112,7 +112,7 @@ class VideoRenderingService {
             $outputFile = $this->persistOutputFile($outputFolder, $outputName, $localOutputPath);
             $fileId     = $outputFile->getId();
 
-            $this->updateEventVideoFileId($eventId, $fileId);
+            $this->updateEventVideoFileId($eventId, $userId, $fileId);
 
             $this->logger->info('Reel: render complete for event {id}, file {fileId}', [
                 'id'     => $eventId,
@@ -1912,6 +1912,9 @@ class VideoRenderingService {
     private function buildOutputFilename(array $event): string {
         $slug = strtolower(preg_replace('/[^a-zA-Z0-9]+/', '-', $event['title'] ?? 'reel'));
         $slug = trim($slug, '-');
+        if (strlen($slug) > 80) {
+            $slug = rtrim(substr($slug, 0, 80), '-');
+        }
         return 'reel-' . $slug . '-' . $event['id'] . '.mp4';
     }
 
@@ -2017,18 +2020,19 @@ class VideoRenderingService {
 
     private function cleanupTempDir(string $tempDir): void {
         if (!is_dir($tempDir)) return;
-        foreach (glob($tempDir . '/*') as $file) {
+        foreach (glob($tempDir . '/*') ?: [] as $file) {
             @unlink($file);
         }
         @rmdir($tempDir);
     }
 
-    private function updateEventVideoFileId(int $eventId, int $fileId): void {
+    private function updateEventVideoFileId(int $eventId, string $userId, int $fileId): void {
         $qb = $this->db->getQueryBuilder();
         $qb->update('reel_events')
             ->set('video_file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT))
             ->set('updated_at',    $qb->createNamedParameter(time(),   IQueryBuilder::PARAM_INT))
             ->where($qb->expr()->eq('id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
             ->executeStatement();
     }
 }

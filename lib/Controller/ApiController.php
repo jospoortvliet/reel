@@ -36,9 +36,19 @@ class ApiController extends OCSController {
     // Events
     // -------------------------------------------------------------------------
 
+    /** Returns a 401 response if the user is not authenticated, null otherwise. */
+    private function requireUserId(): ?DataResponse {
+        if ($this->userId === null) {
+            return new DataResponse(['error' => 'Not authenticated'], 401);
+        }
+        return null;
+    }
+
     #[NoAdminRequired]
     #[ApiRoute(verb: 'GET', url: '/api/v1/events')]
     public function listEvents(): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
+
         $qb = $this->db->getQueryBuilder();
         $qb->select('e.*')
             ->selectAlias($qb->createFunction('COUNT(m.id)'), 'media_count')
@@ -50,12 +60,13 @@ class ApiController extends OCSController {
 
         $events = $qb->executeQuery()->fetchAll();
 
-        // Batch-load the cover file ID for all events in one portable query.
-        // A correlated subquery with backtick quoting and LIMIT 1 was used before,
-        // but backticks are MySQL-only syntax and fail on PostgreSQL/SQLite.
+        // Batch-load cover file IDs and the most recent job for all events in two
+        // portable queries, avoiding N+1 per-event queries.
         $covers = [];
+        $jobsByEventId = [];
         if (!empty($events)) {
-            $eventIds = array_column($events, 'id');
+            $eventIds = array_map('intval', array_column($events, 'id'));
+
             foreach (array_chunk($eventIds, 1000) as $chunk) {
                 $cqb = $this->db->getQueryBuilder();
                 $cqb->select('event_id', 'file_id')
@@ -71,11 +82,13 @@ class ApiController extends OCSController {
                     }
                 }
             }
+
+            $jobsByEventId = $this->jobService->getLatestForEvents($eventIds, $this->userId);
         }
 
         foreach ($events as &$event) {
             $event['cover_file_id'] = $covers[(int)$event['id']] ?? null;
-            $job = $this->jobService->getLatestForEvent((int)$event['id'], $this->userId);
+            $job = $jobsByEventId[(int)$event['id']] ?? null;
             $event['job'] = $job ? $this->formatJob($job) : null;
             if ($event['cover_file_id']) {
                 $event['cover_thumbnail_url'] = '/index.php/core/preview?fileId='
@@ -91,6 +104,7 @@ class ApiController extends OCSController {
     #[NoAdminRequired]
     #[ApiRoute(verb: 'GET', url: '/api/v1/events/{id}')]
     public function getEvent(int $id): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         $event = $this->fetchEvent($id);
         if (!$event) {
             return new DataResponse(['error' => 'Not found'], 404);
@@ -116,6 +130,10 @@ class ApiController extends OCSController {
     #[NoAdminRequired]
     #[ApiRoute(verb: 'PUT', url: '/api/v1/events/{id}')]
     public function updateEvent(int $id, ?string $title = null, ?string $theme = null, ?string $motion_style = null): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
+        if ($title === null && $theme === null && $motion_style === null) {
+            return new DataResponse($this->fetchEvent($id));
+        }
         $qb = $this->db->getQueryBuilder();
         $qb->update('reel_events');
 
@@ -159,6 +177,7 @@ class ApiController extends OCSController {
         ?float $video_start = null,
         ?float $video_length = null,
     ): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         $qb = $this->db->getQueryBuilder();
         $qb->update('reel_event_media');
 
@@ -198,6 +217,7 @@ class ApiController extends OCSController {
     #[NoAdminRequired]
     #[ApiRoute(verb: 'POST', url: '/api/v1/events/{id}/render')]
     public function renderEvent(int $id): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         $event = $this->fetchEvent($id);
         if (!$event) {
             return new DataResponse(['error' => 'Not found'], 404);
@@ -219,6 +239,7 @@ class ApiController extends OCSController {
     #[NoAdminRequired]
     #[ApiRoute(verb: 'GET', url: '/api/v1/events/{id}/status')]
     public function getEventStatus(int $id): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         $event = $this->fetchEvent($id);
         if (!$event) {
             return new DataResponse(['error' => 'Not found'], 404);

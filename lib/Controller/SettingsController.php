@@ -34,9 +34,17 @@ class SettingsController extends OCSController {
         parent::__construct($appName, $request);
     }
 
+    private function requireUserId(): ?DataResponse {
+        if ($this->userId === null) {
+            return new DataResponse(['error' => 'Not authenticated'], 401);
+        }
+        return null;
+    }
+
     #[NoAdminRequired]
     #[ApiRoute(verb: 'GET', url: '/api/v1/settings')]
     public function getSettings(): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         return new DataResponse([
             'similarity_threshold' => (int)$this->config->getUserValue(
                 $this->userId,
@@ -108,6 +116,7 @@ class SettingsController extends OCSController {
         ?float  $face_zoom_target_fill = null,
         ?float  $non_face_zoom_end = null,
     ): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
         if ($similarity_threshold !== null) {
             $similarity_threshold = max(1, min(30, $similarity_threshold));
             $this->config->setUserValue(

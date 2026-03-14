@@ -6,7 +6,7 @@ Reel is a Nextcloud app that automatically generates highlight videos from your 
 
 ### Requirements
 
-- Nextcloud 34 or later
+- Nextcloud 30 or later
 - The [Memories](https://apps.nextcloud.com/apps/memories) app, installed and indexed
 - FFmpeg 7.x installed on the server
 - PHP Imagick extension (for HEIC/AVIF support)
@@ -268,7 +268,10 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] **Portrait/square rendering** — FFmpeg filter chain now adapts output dimensions for 16:9, 9:16, and 1:1
 - [x] **App Store prep** — metadata, screenshots, signing, release workflow
 - [x] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
-- [ ] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
+- [x] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
+- [ ] put limits on the nr of items to limit length (and size) of videos
+- [ ] auto-create videos (with some limits!)
+- [ ] create/detect special types of events - like 'pets in 2025' or an entire vacation in a separate country, or a city trip.
 - [ ] **Masonry/aspect-ratio thumbnails** — needs custom thumbnail generation since Nextcloud's preview API crops to square
 - [ ] **Ultra-smooth motion pipeline** — animate on an upscaled working canvas first, then downscale to output at the end (best-quality approach to reduce subpixel jitter)
 
