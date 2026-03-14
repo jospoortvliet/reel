@@ -141,6 +141,7 @@ This prints a dry-run report showing which photos were identified as burst dupli
 
 ### Event detection
 - Clusters photos into events by 6-hour time gaps and location changes
+- Uses a rolling 6-hour gap between consecutive items and ignores clusters smaller than 6 media items
 - Titles like "Barcelona · March 2026" using most-frequent place name
 - Reads from Memories' database tables (`oc_memories`, place data)
 - Nightly background job (`DetectEventsJob`) re-runs detection automatically
@@ -187,19 +188,14 @@ This prints a dry-run report showing which photos were identified as burst dupli
 
 ## Roadmap / todo
 
-### High priority
 - [x] **Test live photo rendering end-to-end** — the name-swap lookup is new, needs a real render run
 - [x] **Incremental event detection** — currently clears and rewrites all events on each run, so event IDs change and any user customisations (excluded media, live photo toggles) are lost
 - [x] **Face zoom in Ken Burns** — instead of always zooming to centre, zoom toward the detected face position from Recognize
-
-### Medium priority
 - [x] **Live photo duration** — currently capped at `MAX_CLIP_DURATION` (8s); most live photos are 2–3s, should use actual duration from the `.mov` metadata
 - [x] **Video duration UI** — backend now supports segment windows (start + length via `edit_settings`), and users can set clip timing in the event detail view
 - [x] **Music** — bundled tracks in `assets/music/` and wired theme-based soundtrack selection in renders
 - [x] **Theme picker UI** — theme selection is available in the event detail header and persists per event
 - [x] **Portrait/square rendering** — FFmpeg filter chain now adapts output dimensions for 16:9, 9:16, and 1:1
-
-### Lower priority / future
 - [ ] **App Store prep** — metadata, screenshots, signing, release workflow
 - [ ] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
 - [ ] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
@@ -208,4 +204,6 @@ This prints a dry-run report showing which photos were identified as burst dupli
 
 ## Resources
 
-TBD
+- Repository: https://github.com/jospoortvliet/reel
+- Issue tracker: https://github.com/jospoortvliet/reel/issues
+- Discussions: https://github.com/jospoortvliet/reel/discussions

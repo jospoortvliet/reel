@@ -95,11 +95,16 @@ class VideoRenderingService {
             $outputName      = $this->buildOutputFilename($event);
             $localOutputPath = $tempDir . '/final.mp4';
 
+            $eventMotionStyle = $event['motion_style'] ?? null;
+            $resolvedMotionStyle = in_array($eventMotionStyle, ['classic', 'apple_subtle'], true)
+                ? $eventMotionStyle
+                : $this->getMotionStyle($userId);
+
             $this->concatenateIntermediates(
                 $clips,
                 $localOutputPath,
                 $event['theme'] ?? null,
-                $this->getMotionStyle($userId),
+                $resolvedMotionStyle,
                 $onDebug,
             );
 
@@ -208,7 +213,7 @@ class VideoRenderingService {
             }
 
             $cmd = $item['is_video']
-                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $item['duration'], (float)($item['start_at'] ?? 0.0))
+                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $item['duration'], (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), $motionStyle)
                 : $this->buildPhotoNormalizeCmd($inputPath, $outPath, $item['duration'], $item['motion']);
 
             $this->logger->debug('Reel: normalizing item {i}/{total}', [
@@ -267,7 +272,7 @@ class VideoRenderingService {
      * Normalize a video clip to standard intermediate format.
      * Handles any input codec/container.
      */
-    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0): array {
+    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0, int $videoW = 0, int $videoH = 0, string $motionStyle = 'classic'): array {
         $cmd = [
             'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
             '-i', $inputPath,
@@ -276,6 +281,53 @@ class VideoRenderingService {
         if ($startAt > 0.0) {
             $cmd[] = '-ss';
             $cmd[] = number_format($startAt, 3, '.', '');
+        }
+
+        // For apple_subtle, use a blurred fill background instead of black bars
+        // when the video aspect ratio differs from the output (e.g. portrait video
+        // in a landscape frame, or landscape video in a portrait frame).
+        if ($motionStyle === 'apple_subtle' && $videoW > 0 && $videoH > 0) {
+            $outW = $this->outputWidth();
+            $outH = $this->outputHeight();
+            $targetAspect = $this->targetAspect();
+            $videoAspect  = $videoW / $videoH;
+            $aspectDiff   = abs($videoAspect - $targetAspect) / $targetAspect;
+
+            if ($aspectDiff > 0.02) {
+                // Fit the video into the output frame (no crop), letterbox/pillarbox.
+                if ($videoAspect >= $targetAspect) {
+                    $fitW = $outW;
+                    $fitH = (int)(round($outW / $videoAspect / 2) * 2);
+                } else {
+                    $fitH = $outH;
+                    $fitW = (int)(round($outH * $videoAspect / 2) * 2);
+                }
+                $overlayX = (int)(($outW - $fitW) / 2);
+                $overlayY = (int)(($outH - $fitH) / 2);
+
+                $fc = implode(';', [
+                    '[0:v]split=2[bgsrc][fgsrc]',
+                    "[bgsrc]scale=w={$outW}:h={$outH}:force_original_aspect_ratio=increase,crop={$outW}:{$outH},gblur=sigma=36,eq=saturation=0.92:brightness=-0.02[bg]",
+                    "[fgsrc]scale=w={$fitW}:h={$fitH}:flags=lanczos[fg]",
+                    "[bg][fg]overlay=x={$overlayX}:y={$overlayY},setsar=1[vout]",
+                ]);
+
+                return array_merge($cmd, [
+                    '-t', number_format($duration, 3, '.', ''),
+                    '-filter_complex', $fc,
+                    '-map', '[vout]',
+                    '-map', '0:a?',
+                    '-r', (string)self::FPS,
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '18',
+                    '-c:a', 'aac',
+                    '-ar', '44100',
+                    '-ac', '2',
+                    '-movflags', '+faststart',
+                    $outputPath,
+                ]);
+            }
         }
 
         return array_merge($cmd, [
@@ -300,8 +352,11 @@ class VideoRenderingService {
     private function buildPhotoNormalizeCmd(string $inputPath, string $outputPath, float $duration, array $motion): array {
         $frameCount = (int)ceil($duration * self::FPS);
 
-        $zoomStart = number_format((float)$motion['zoom_start'], 4, '.', '');
-        $zoomEnd = number_format((float)$motion['zoom_end'], 4, '.', '');
+        $style = (string)($motion['style'] ?? 'classic');
+        $zoomStartRaw = (float)($motion['zoom_start'] ?? 1.0);
+        $zoomEndRaw = (float)($motion['zoom_end'] ?? 1.0);
+        $zoomStart = number_format($zoomStartRaw, 4, '.', '');
+        $zoomEnd = number_format($zoomEndRaw, 4, '.', '');
         $fx = number_format((float)$motion['fx'], 4, '.', '');
         $fy = number_format((float)($motion['fy'] ?? 0.5), 4, '.', '');
         $mode = (string)($motion['mode'] ?? 'zoom');
@@ -318,6 +373,97 @@ class VideoRenderingService {
 
         $t = '(n/' . $framesMinusOne . ')';
         $zoomEase = $this->easeInOutCubicExpr($t);
+
+        if ($style === 'apple_subtle') {
+            // Clamp zoom range to subtle values.
+            $appleZoomStart = $this->clamp($zoomStartRaw, 0.98, 1.06);
+            $appleZoomEnd   = $this->clamp($zoomEndRaw,   0.98, 1.06);
+
+            // Compute the fit dimensions: the pixel box the photo occupies when
+            // letterboxed/pillarboxed into the output frame (no cropping).
+            // Dimensions must be even (required by libx264).
+            $imageAspect = (float)($motion['image_aspect'] ?? $targetAspect);
+            if ($imageAspect >= $targetAspect) {
+                $fitW = $outW;
+                $fitH = (int)(round($outW / $imageAspect / 2) * 2);
+            } else {
+                $fitH = $outH;
+                $fitW = (int)(round($outH * $imageAspect / 2) * 2);
+            }
+
+            // zoompan: input is pre-scaled to fitW×fitH; output is always fitW×fitH.
+            // zoom=1.0 → shows the full fitW×fitH (no zoom), zoom>1 → zoomed in.
+            // The overlay onto the blurred background is always at a fixed position.
+            $appleZoomStartFmt = number_format($appleZoomStart, 4, '.', '');
+            $appleZoomEndFmt   = number_format($appleZoomEnd,   4, '.', '');
+
+            // 'on' is zoompan's output frame counter (0-indexed).
+            // easeInOutCubic in terms of on/(frameCount-1):
+            $zpT = "on/{$framesMinusOne}";
+            $zpEase = $this->easeInOutCubicExpr($zpT);
+            $zpZoom = "{$appleZoomStartFmt}+({$appleZoomEndFmt}-{$appleZoomStartFmt})*{$zpEase}";
+
+            // fx/fy bias: slight off-center offset toward focus point (in input pixel space).
+            // Available slack = fitW - fitW/zoom (changes with zoom). We use fitW/maxZoom for
+            // a representative constant bias offset that scales naturally with zoom level.
+            $fxBias = $this->clamp((((float)($motion['fx'] ?? 0.5)) - 0.5) * 0.4, -0.2, 0.2);
+            $fyBias = $this->clamp((((float)($motion['fy'] ?? 0.5)) - 0.5) * 0.4, -0.2, 0.2);
+            $biasX  = number_format($fxBias * $fitW * 0.02, 2, '.', '');
+            $biasY  = number_format($fyBias * $fitH * 0.02, 2, '.', '');
+
+            // zoompan x/y = top-left corner of the visible window in the input (fitW×fitH) space.
+            // Center + bias:  x = iw/2 - iw/(2*zoom) + bias
+            $zpCenterX = "iw/2-(iw/zoom/2)";
+            $zpCenterY = "ih/2-(ih/zoom/2)";
+
+            if ($mode === 'pan_x') {
+                // Pan from left to right across the zoomed canvas.
+                // Available horizontal travel = iw - iw/zoom = iw*(1-1/zoom)
+                $zpX = "max(0,iw*(1-1/zoom)*{$zpEase}+{$biasX})";
+                $zpY = "max(0,{$zpCenterY}+{$biasY})";
+            } elseif ($mode === 'pan_y') {
+                $zpX = "max(0,{$zpCenterX}+{$biasX})";
+                $zpY = "max(0,ih*(1-1/zoom)*{$zpEase}+{$biasY})";
+            } else {
+                $zpX = "max(0,{$zpCenterX}+{$biasX})";
+                $zpY = "max(0,{$zpCenterY}+{$biasY})";
+            }
+
+            // Overlay is constant: fit box always centered in output frame.
+            $overlayX = (int)(($outW - $fitW) / 2);
+            $overlayY = (int)(($outH - $fitH) / 2);
+
+            $fitScale = "scale=w={$fitW}:h={$fitH}:flags=lanczos";
+            $zpFilter = "zoompan=z='{$zpZoom}':x='{$zpX}':y='{$zpY}':d={$frameCount}:s={$fitW}x{$fitH}:fps=" . self::FPS;
+
+            $fc = implode(';', [
+                "[0:v]split=2[bgsrc][fgsrc]",
+                "[bgsrc]scale=w={$outW}:h={$outH}:force_original_aspect_ratio=increase,crop={$outW}:{$outH},gblur=sigma=36,eq=saturation=0.92:brightness=-0.02[bg]",
+                "[fgsrc]{$fitScale},{$zpFilter}[fg]",
+                "[bg][fg]overlay=x={$overlayX}:y={$overlayY},setsar=1[vout]",
+            ]);
+
+            return [
+                'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                '-loop', '1',
+                '-i', $inputPath,
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-t', number_format($duration, 2, '.', ''),
+                '-filter_complex', $fc,
+                '-map', '[vout]',
+                '-map', '1:a',
+                '-r', (string)self::FPS,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '18',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-shortest',
+                '-movflags', '+faststart',
+                $outputPath,
+            ];
+        }
 
         // For explicit pan modes, animate crop directly over the full clip duration.
         // This avoids zoompan timing quirks with looped still-image inputs.
@@ -936,6 +1082,9 @@ class VideoRenderingService {
                     $motion['style'] = 'apple_subtle';
                     $motion['run_motion'] = $subtleRunMotion;
                     $motion['run_remaining'] = $subtleRunRemaining;
+                    $dimW = (int)$dims['w'];
+                    $dimH = (int)$dims['h'];
+                    $motion['image_aspect'] = ($dimH > 0) ? ($dimW / $dimH) : $this->targetAspect();
                     $subtleRunRemaining--;
                 } else {
                     $motion = $this->buildPhotoMotion(

@@ -99,7 +99,7 @@ class ApiController extends OCSController {
 
     #[NoAdminRequired]
     #[ApiRoute(verb: 'PUT', url: '/api/v1/events/{id}')]
-    public function updateEvent(int $id, ?string $title = null, ?string $theme = null): DataResponse {
+    public function updateEvent(int $id, ?string $title = null, ?string $theme = null, ?string $motion_style = null): DataResponse {
         $qb = $this->db->getQueryBuilder();
         $qb->update('reel_events');
 
@@ -112,6 +112,13 @@ class ApiController extends OCSController {
                 $theme = 'default';
             }
             $qb->set('theme', $qb->createNamedParameter($theme));
+        }
+        if ($motion_style !== null) {
+            $allowedStyles = ['classic', 'apple_subtle'];
+            if (!in_array($motion_style, $allowedStyles, true)) {
+                $motion_style = 'classic';
+            }
+            $qb->set('motion_style', $qb->createNamedParameter($motion_style));
         }
 
         $qb->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
@@ -284,6 +291,7 @@ class ApiController extends OCSController {
             }
 
             $isClipVideo = $row['isvideo'] || $row['use_live_video'];
+            $canEditClipTiming = $row['isvideo'];
             $defaultLength = $row['video_duration'] > 0
                 ? min(8.0, $row['video_duration'])
                 : 8.0;
@@ -295,8 +303,13 @@ class ApiController extends OCSController {
             $effectiveStart = min($row['video_start'] ?: $defaultStart, $maxStart);
 
             $row['is_clip_video'] = $isClipVideo;
-            $row['effective_video_start'] = $isClipVideo ? $effectiveStart : 0.0;
-            $row['effective_video_length'] = $isClipVideo ? $effectiveLength : 0.0;
+            $row['can_edit_clip_timing'] = $canEditClipTiming;
+            $row['effective_video_start'] = $canEditClipTiming ? $effectiveStart : 0.0;
+            $row['effective_video_length'] = $canEditClipTiming ? $effectiveLength : 0.0;
+            if (!$canEditClipTiming) {
+                $row['video_start'] = 0.0;
+                $row['video_length'] = null;
+            }
 
             return $row;
         }, $rows);

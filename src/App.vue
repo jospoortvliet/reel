@@ -38,6 +38,7 @@ interface Event {
 	date_start: number
 	date_end: number
 	theme: string | null
+	motion_style: string | null
 	video_file_id: number | null
 	cover_file_id?: number | null
 	cover_thumbnail_url: string | null
@@ -61,6 +62,7 @@ interface MediaItem {
 	video_start?: number
 	video_length?: number | null
 	is_clip_video?: boolean
+	can_edit_clip_timing?: boolean
 	effective_video_start?: number
 	effective_video_length?: number
 }
@@ -88,6 +90,11 @@ const themeOptions = [
 	{ value: 'default', label: t('reel', 'Default') },
 	{ value: 'summer', label: t('reel', 'Summer') },
 	{ value: 'minimal', label: t('reel', 'Minimal') },
+]
+
+const motionStyleOptions = [
+	{ value: 'classic', label: t('reel', 'Classic') },
+	{ value: 'apple_subtle', label: t('reel', 'Apple') },
 ]
 
 // -------------------------------------------------------------------------
@@ -171,6 +178,23 @@ async function updateEventTheme(theme: string) {
 	}
 }
 
+async function updateEventMotionStyle(style: string) {
+	if (!selectedEvent.value) return
+	try {
+		const eventId = selectedEvent.value.id
+		const url = generateOcsUrl(`/apps/reel/api/v1/events/${eventId}`)
+		await axios.put(url, { motion_style: style }, { params: { format: 'json' } })
+		selectedEvent.value.motion_style = style
+		const row = events.value.find(e => e.id === eventId)
+		if (row) {
+			row.motion_style = style
+		}
+		showSuccess(t('reel', 'Style updated'))
+	} catch (e) {
+		showError(t('reel', 'Failed to update style'))
+	}
+}
+
 function openMediaInViewer(item: MediaItem) {
 	if (window.OCA?.Viewer) {
 		window.OCA.Viewer.open({ path: item.viewer_path })
@@ -200,6 +224,10 @@ async function toggleMedia(item: MediaItem) {
 }
 
 function openClipEditor(item: MediaItem) {
+	if (!item.can_edit_clip_timing) {
+		return
+	}
+
 	const sourceDuration = Math.max(0, Number(item.video_duration ?? 0))
 	const fallbackLength = sourceDuration > 0 ? Math.min(8, sourceDuration) : 8
 	const currentLength = Number(item.video_length ?? item.effective_video_length ?? fallbackLength)
@@ -231,7 +259,7 @@ function onClipLengthInput() {
 
 async function saveClipWindow() {
 	const item = clipEditorItem.value
-	if (!item || !selectedEvent.value) return
+	if (!item || !selectedEvent.value || !item.can_edit_clip_timing) return
 
 	try {
 		const sourceDuration = Math.max(0, Number(item.video_duration ?? 0))
@@ -261,7 +289,7 @@ async function saveClipWindow() {
 
 async function resetClipWindow() {
 	const item = clipEditorItem.value
-	if (!item || !selectedEvent.value) return
+	if (!item || !selectedEvent.value || !item.can_edit_clip_timing) return
 
 	try {
 		const sourceDuration = Math.max(0, Number(item.video_duration ?? 0))
@@ -519,6 +547,21 @@ watch(() => route.params.id, async (id) => {
 								</option>
 							</select>
 						</div>
+						<div :class="$style.themeRow">
+							<label :class="$style.themeLabel" for="style-select">{{ t('reel', 'Motion style') }}</label>
+							<select
+								id="style-select"
+								:class="$style.themeSelect"
+								:value="selectedEvent.motion_style ?? 'classic'"
+								@change="updateEventMotionStyle(($event.target as HTMLSelectElement).value || 'classic')">
+								<option
+									v-for="opt in motionStyleOptions"
+									:key="opt.value"
+									:value="opt.value">
+									{{ opt.label }}
+								</option>
+							</select>
+						</div>
 					</div>
 					<div :class="$style.actions">
 						<NcButton
@@ -607,7 +650,7 @@ watch(() => route.params.id, async (id) => {
 							<span :class="[$style.ncIcon, item.use_live_video ? 'icon-play' : 'icon-picture']" aria-hidden="true" />
 						</button>
 						<button
-							v-if="item.is_clip_video"
+							v-if="item.can_edit_clip_timing"
 							:class="$style.clipToggleBtn"
 							:title="t('reel', 'Edit clip timing')"
 							@click.stop="openClipEditor(item)">

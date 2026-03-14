@@ -28,6 +28,9 @@ class EventDetectionService {
 
     // A gap of more than this between consecutive photos triggers a new event
     private const TIME_GAP_SECONDS = 6 * 60 * 60; // 6 hours
+    private const MIN_EVENT_ITEMS = 6;
+    private const PLACE_CHANGE_MIN_GAP_SECONDS = 30 * 60; // 30 minutes
+    private const PLACE_DOMINANCE_THRESHOLD = 0.6;
 
     // OSM admin_level for city-level granularity (8 = city, 6 = county, 4 = region)
     // We prefer the most specific level available
@@ -143,7 +146,7 @@ class EventDetectionService {
      * Splits a time-sorted list of media rows into event clusters.
      *
      * A new cluster is started when:
-     *   - The time gap to the previous item exceeds TIME_GAP_SECONDS, OR
+    *   - The time gap to the previous item exceeds TIME_GAP_SECONDS, OR
      *   - The place name changes (and both items have a known place)
      *
      * Returns an array of clusters, each being:
@@ -168,8 +171,11 @@ class EventDetectionService {
                 continue;
             }
 
+            // Compare against the most recent item already in the cluster,
+            // so long days with steady activity do not split just because the
+            // first and last items are more than 6 hours apart.
             $timeGap       = $epoch - $current['date_end'];
-            $placeChanged  = $this->placeChanged($current, $item);
+            $placeChanged  = $this->placeChanged($current, $item, $timeGap);
 
             if ($timeGap > self::TIME_GAP_SECONDS || $placeChanged) {
                 // Finalise the current cluster and start a new one
@@ -193,8 +199,8 @@ class EventDetectionService {
             $clusters[] = $this->finaliseCluster($current);
         }
 
-        // Filter out clusters with fewer than 2 items — not worth a reel
-        return array_values(array_filter($clusters, fn($c) => count($c['media']) >= 2));
+        // Filter out small clusters — they tend to produce weak, noisy reels.
+        return array_values(array_filter($clusters, fn($c) => count($c['media']) >= self::MIN_EVENT_ITEMS));
     }
 
     private function newCluster(array $item): array {
@@ -224,15 +230,23 @@ class EventDetectionService {
 
     /**
      * Returns true if the item's place name is known, different from the
-     * cluster's dominant place, and the cluster has enough items to have
-     * established a dominant place.
+     * cluster's dominant place, the cluster has enough items to have
+     * established a dominant place, and there was a meaningful pause before
+     * the new place appeared.
      */
-    private function placeChanged(array $cluster, array $item): bool {
+    private function placeChanged(array $cluster, array $item, int $timeGap): bool {
         if (empty($item['place_name']))         return false;
         if (empty($cluster['place_counts']))    return false;
+        if ($timeGap < self::PLACE_CHANGE_MIN_GAP_SECONDS) return false;
 
         arsort($cluster['place_counts']);
         $dominant = array_key_first($cluster['place_counts']);
+        $dominantCount = (int)($cluster['place_counts'][$dominant] ?? 0);
+        $totalCount = (int)array_sum($cluster['place_counts']);
+
+        if ($totalCount <= 0 || ($dominantCount / $totalCount) < self::PLACE_DOMINANCE_THRESHOLD) {
+            return false;
+        }
 
         return $item['place_name'] !== $dominant
             && array_sum($cluster['place_counts']) >= 3; // need at least 3 items to trust dominant place

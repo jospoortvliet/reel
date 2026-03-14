@@ -31,12 +31,32 @@ Example use cases
 * 🎉 Event highlights from birthdays, weddings, or parties
 * 👨‍👩‍👧 Family memories automatically summarized
 * 📅 Daily or yearly highlights from your photo archive</description>
+	<screenshot>
+		<url>https://raw.githubusercontent.com/jospoortvliet/reel/main/screenshot_reel_overview.png</url>
+		<alt>Reel app screenshot showing the events overview of the app</alt>
+	</screenshot>
+	<screenshot>
+		<url>https://raw.githubusercontent.com/jospoortvliet/reel/main/screenshot_reel_rendering.png</url>
+		<alt>Reel app screenshot showing a highlight video rendering in progress</alt>
+	</screenshot>
+	<screenshot>
+		<url>https://raw.githubusercontent.com/jospoortvliet/reel/main/screenshot_reel_video_trim.png</url>
+		<alt>Reel app screenshot showing a highlight video trim settings</alt>
+	</screenshot>
 	<version>1.0.0</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="hello@jospoortvliet.com" homepage="https://jospoortvliet.com">Jos Poortvliet</author>
 	<namespace>Reel</namespace>
+	<documentation>
+		<user>https://github.com/jospoortvliet/reel#usage</user>
+		<admin>https://github.com/jospoortvliet/reel#command-line</admin>
+		<developer>https://github.com/jospoortvliet/reel#technical-overview</developer>
+	</documentation>
 	<category>multimedia</category>
-	<bugs>https://github.com/jospoortvliet</bugs>
+	<website>https://github.com/jospoortvliet/reel</website>
+	<discussion>https://github.com/jospoortvliet/reel/discussions</discussion>
+	<bugs>https://github.com/jospoortvliet/reel/issues</bugs>
+	<repository type="git">https://github.com/jospoortvliet/reel.git</repository>
 	<dependencies>
 		<nextcloud min-version="34" max-version="34"/>
 	</dependencies>
