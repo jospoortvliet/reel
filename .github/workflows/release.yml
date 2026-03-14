@@ -128,8 +128,20 @@ jobs:
             build/release/*.zip
             build/release/*.sha256
 
+      - name: Check App Store credentials availability
+        id: appstore
+        env:
+          APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [[ -n "$APPSTORE_TOKEN" && -n "$APP_PRIVATE_KEY" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish signed release to Nextcloud App Store
-        if: startsWith(steps.meta.outputs.tag_name, 'v') && secrets.APPSTORE_TOKEN != '' && secrets.APP_PRIVATE_KEY != ''
+        if: startsWith(steps.meta.outputs.tag_name, 'v') && steps.appstore.outputs.enabled == 'true'
         uses: R0Wi/nextcloud-appstore-push-action@v1.0.4
         with:
           app_name: ${{ env.APP_NAME }}
