@@ -271,7 +271,7 @@ class EventDetectionService {
 
     private function persistClustersIncremental(string $userId, array $clusters): void {
         $existing = $this->loadExistingEventsWithMedia($userId);
-        $matchedEventIds = [];
+        $matchedEventIds = []; // keyed set for O(1) lookup
 
         foreach ($clusters as $cluster) {
             $clusterFileIds = array_values(array_map(
@@ -283,16 +283,16 @@ class EventDetectionService {
             if ($eventId !== null) {
                 $this->updateEventRow($eventId, $cluster);
                 $this->syncEventMedia($eventId, $userId, $clusterFileIds);
-                $matchedEventIds[] = $eventId;
+                $matchedEventIds[$eventId] = true;
                 continue;
             }
 
             $newEventId = $this->insertEventWithMedia($userId, $cluster);
-            $matchedEventIds[] = $newEventId;
+            $matchedEventIds[$newEventId] = true;
         }
 
         foreach ($existing as $eventId => $_event) {
-            if (!in_array((int)$eventId, $matchedEventIds, true)) {
+            if (!isset($matchedEventIds[(int)$eventId])) {
                 $this->deleteEvent((int)$eventId, $userId);
             }
         }
@@ -352,7 +352,7 @@ class EventDetectionService {
         return $events;
     }
 
-    private function findBestExistingEventMatch(array $cluster, array $clusterFileIds, array $existing, array $alreadyMatchedEventIds): ?int {
+    private function findBestExistingEventMatch(array $cluster, array $clusterFileIds, array $existing, array $alreadyMatchedSet): ?int {
         if (empty($clusterFileIds)) {
             return null;
         }
@@ -366,7 +366,7 @@ class EventDetectionService {
         $bestOverlap = 0.0;
 
         foreach ($existing as $eventId => $event) {
-            if (in_array((int)$eventId, $alreadyMatchedEventIds, true)) {
+            if (isset($alreadyMatchedSet[(int)$eventId])) {
                 continue;
             }
 
@@ -436,41 +436,54 @@ class EventDetectionService {
             $existingByFileId[(int)$row['file_id']] = (int)$row['id'];
         }
 
-        $seen = [];
-        foreach ($clusterFileIds as $order => $fileId) {
-            $fileId = (int)$fileId;
-            $seen[$fileId] = true;
+        $seen      = [];
+        $toDelete  = [];
 
-            if (isset($existingByFileId[$fileId])) {
-                $update = $this->db->getQueryBuilder();
-                $update->update('reel_event_media')
-                    ->set('sort_order', $update->createNamedParameter($order, IQueryBuilder::PARAM_INT))
-                    ->where($update->expr()->eq('id', $update->createNamedParameter($existingByFileId[$fileId], IQueryBuilder::PARAM_INT)))
+        $this->db->beginTransaction();
+        try {
+            foreach ($clusterFileIds as $order => $fileId) {
+                $fileId = (int)$fileId;
+                $seen[$fileId] = true;
+
+                if (isset($existingByFileId[$fileId])) {
+                    $update = $this->db->getQueryBuilder();
+                    $update->update('reel_event_media')
+                        ->set('sort_order', $update->createNamedParameter($order, IQueryBuilder::PARAM_INT))
+                        ->where($update->expr()->eq('id', $update->createNamedParameter($existingByFileId[$fileId], IQueryBuilder::PARAM_INT)))
+                        ->executeStatement();
+                    continue;
+                }
+
+                $insert = $this->db->getQueryBuilder();
+                $insert->insert('reel_event_media')
+                    ->values([
+                        'event_id' => $insert->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
+                        'user_id' => $insert->createNamedParameter($userId),
+                        'file_id' => $insert->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+                        'included' => $insert->createNamedParameter(1, IQueryBuilder::PARAM_INT),
+                        'sort_order' => $insert->createNamedParameter($order, IQueryBuilder::PARAM_INT),
+                    ])
                     ->executeStatement();
-                continue;
             }
 
-            $insert = $this->db->getQueryBuilder();
-            $insert->insert('reel_event_media')
-                ->values([
-                    'event_id' => $insert->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
-                    'user_id' => $insert->createNamedParameter($userId),
-                    'file_id' => $insert->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-                    'included' => $insert->createNamedParameter(1, IQueryBuilder::PARAM_INT),
-                    'sort_order' => $insert->createNamedParameter($order, IQueryBuilder::PARAM_INT),
-                ])
-                ->executeStatement();
-        }
-
-        if (!empty($existingByFileId)) {
             foreach ($existingByFileId as $fileId => $rowId) {
                 if (!isset($seen[$fileId])) {
-                    $delete = $this->db->getQueryBuilder();
-                    $delete->delete('reel_event_media')
-                        ->where($delete->expr()->eq('id', $delete->createNamedParameter($rowId, IQueryBuilder::PARAM_INT)))
-                        ->executeStatement();
+                    $toDelete[] = $rowId;
                 }
             }
+
+            // Batch-delete removed rows in one query per chunk
+            foreach (array_chunk($toDelete, 1000) as $chunk) {
+                $delete = $this->db->getQueryBuilder();
+                $delete->delete('reel_event_media')
+                    ->where($delete->expr()->in('id', $delete->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                    ->executeStatement();
+            }
+
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
         }
     }
 
@@ -492,17 +505,24 @@ class EventDetectionService {
 
         $eventId = (int)$this->db->lastInsertId('oc_reel_events');
 
-        foreach ($cluster['media'] as $order => $item) {
-            $mqb = $this->db->getQueryBuilder();
-            $mqb->insert('reel_event_media')
-                ->values([
-                    'event_id' => $mqb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
-                    'user_id' => $mqb->createNamedParameter($userId),
-                    'file_id' => $mqb->createNamedParameter((int)$item['fileid'], IQueryBuilder::PARAM_INT),
-                    'included' => $mqb->createNamedParameter(1, IQueryBuilder::PARAM_INT),
-                    'sort_order' => $mqb->createNamedParameter($order, IQueryBuilder::PARAM_INT),
-                ])
-                ->executeStatement();
+        $this->db->beginTransaction();
+        try {
+            foreach ($cluster['media'] as $order => $item) {
+                $mqb = $this->db->getQueryBuilder();
+                $mqb->insert('reel_event_media')
+                    ->values([
+                        'event_id' => $mqb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
+                        'user_id' => $mqb->createNamedParameter($userId),
+                        'file_id' => $mqb->createNamedParameter((int)$item['fileid'], IQueryBuilder::PARAM_INT),
+                        'included' => $mqb->createNamedParameter(1, IQueryBuilder::PARAM_INT),
+                        'sort_order' => $mqb->createNamedParameter($order, IQueryBuilder::PARAM_INT),
+                    ])
+                    ->executeStatement();
+            }
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
         }
 
         // Apply duplicate suppression only for newly created events.

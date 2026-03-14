@@ -139,6 +139,9 @@ class DuplicateFilterService {
     private function detectBursts(array $photos, array $blurhashes, string $userId): array {
         usort($photos, fn($a, $b) => (int)$a['datetaken'] <=> (int)$b['datetaken']);
 
+        $burstGap  = $this->burstGapSeconds($userId);
+        $simThresh = $this->similarityThreshold($userId);
+
         $duplicateGroups = [];
         $current         = [$photos[0]];
 
@@ -147,9 +150,9 @@ class DuplicateFilterService {
             $prevHash     = $blurhashes[(int)$photos[$i - 1]['file_id']] ?? null;
             $currHash     = $blurhashes[(int)$photos[$i]['file_id']] ?? null;
             $visuallySame = $prevHash && $currHash
-                && $this->hammingDistance($prevHash, $currHash) < $this->similarityThreshold($userId);
+                && $this->hammingDistance($prevHash, $currHash) < $simThresh;
 
-            if ($timeDiff <= $this->burstGapSeconds($userId) && $visuallySame) {
+            if ($timeDiff <= $burstGap && $visuallySame) {
                 $current[] = $photos[$i];
             } else {
                 if (count($current) >= self::MIN_BURST_SIZE
@@ -353,13 +356,14 @@ class DuplicateFilterService {
     }
 
     private function markExcluded(int $eventId, string $userId, array $fileIds): void {
-        foreach ($fileIds as $fileId) {
+        // One UPDATE per chunk instead of one per file_id
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
             $qb = $this->db->getQueryBuilder();
             $qb->update('reel_event_media')
                 ->set('included', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
                 ->where($qb->expr()->eq('event_id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
                 ->andWhere($qb->expr()->eq('user_id',  $qb->createNamedParameter($userId)))
-                ->andWhere($qb->expr()->eq('file_id',  $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+                ->andWhere($qb->expr()->in('file_id',  $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
                 ->executeStatement();
         }
     }

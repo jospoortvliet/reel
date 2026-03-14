@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.7] - 2026-03-15
+
+### Performance
+
+- `DuplicateFilterService::markExcluded()` now issues a single batch `UPDATE … WHERE file_id IN (…)` instead of one UPDATE per duplicate.
+- `DuplicateFilterService::detectBursts()` now reads the burst-gap and similarity-threshold config values once before entering the loop instead of on every iteration.
+- `EventDetectionService::syncEventMedia()` now wraps all INSERTs/UPDATEs in a single DB transaction and batches row deletions via `DELETE … WHERE id IN (…)` instead of one query per row.
+- `EventDetectionService::insertEventWithMedia()` now wraps all media INSERTs for a new event in a single DB transaction.
+- `EventDetectionService::persistClustersIncremental()` now uses a hash-set (`isset`) for already-matched event IDs instead of `in_array`, reducing O(n²) to O(n).
+- New migration `Version1002` adds composite DB indexes for the main hot paths: `reel_jobs(event_id, user_id, created_at)`, `reel_event_media(event_id, user_id)`, `reel_event_media(event_id, included, sort_order)`, and `reel_events(user_id, date_start)`.
+- Same migration also creates the `reel_jobs` table declaratively (with a `hasTable` guard) so fresh installs no longer rely on out-of-band table creation.
+
 ## [1.1.6] - 2026-03-15
 
 ### Fixed
