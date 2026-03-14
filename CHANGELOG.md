@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-03-14
+
+### Fixed
+
+- PostgreSQL/SQLite: `listEvents()` used a correlated subquery with backtick identifier quoting (MySQL-only syntax) and `LIMIT 1` inside the subquery. Replaced with a portable batch-fetch of cover file IDs in PHP after the main query.
+- SQLite: `findLiveVideoFileId()` used `CONCAT()` and `LEFT()` which are not available in SQLite. Replaced with two simple queries using PHP-side string manipulation for the filename swap.
+
 ## [1.1.4] - 2026-03-14
 
 ### Fixed

@@ -42,14 +42,6 @@ class ApiController extends OCSController {
         $qb = $this->db->getQueryBuilder();
         $qb->select('e.*')
             ->selectAlias($qb->createFunction('COUNT(m.id)'), 'media_count')
-            ->selectAlias(
-                $qb->createFunction(
-                    '(SELECT mc.file_id FROM `*PREFIX*reel_event_media` mc'
-                    . ' WHERE mc.event_id = e.id AND mc.included = 1'
-                    . ' ORDER BY mc.sort_order ASC LIMIT 1)'
-                ),
-                'cover_file_id'
-            )
             ->from('reel_events', 'e')
             ->leftJoin('e', 'reel_event_media', 'm', $qb->expr()->eq('e.id', 'm.event_id'))
             ->where($qb->expr()->eq('e.user_id', $qb->createNamedParameter($this->userId)))
@@ -58,7 +50,31 @@ class ApiController extends OCSController {
 
         $events = $qb->executeQuery()->fetchAll();
 
+        // Batch-load the cover file ID for all events in one portable query.
+        // A correlated subquery with backtick quoting and LIMIT 1 was used before,
+        // but backticks are MySQL-only syntax and fail on PostgreSQL/SQLite.
+        $covers = [];
+        if (!empty($events)) {
+            $eventIds = array_column($events, 'id');
+            foreach (array_chunk($eventIds, 1000) as $chunk) {
+                $cqb = $this->db->getQueryBuilder();
+                $cqb->select('event_id', 'file_id')
+                    ->from('reel_event_media')
+                    ->where($cqb->expr()->in('event_id', $cqb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                    ->andWhere($cqb->expr()->eq('included', $cqb->createNamedParameter(1, IQueryBuilder::PARAM_INT)))
+                    ->orderBy('event_id', 'ASC')
+                    ->addOrderBy('sort_order', 'ASC');
+                foreach ($cqb->executeQuery()->fetchAll() as $row) {
+                    $eid = (int)$row['event_id'];
+                    if (!isset($covers[$eid])) {
+                        $covers[$eid] = (int)$row['file_id'];
+                    }
+                }
+            }
+        }
+
         foreach ($events as &$event) {
+            $event['cover_file_id'] = $covers[(int)$event['id']] ?? null;
             $job = $this->jobService->getLatestForEvent((int)$event['id'], $this->userId);
             $event['job'] = $job ? $this->formatJob($job) : null;
             if ($event['cover_file_id']) {

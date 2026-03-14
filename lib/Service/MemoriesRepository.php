@@ -74,25 +74,29 @@ class MemoriesRepository {
 
     /**
      * Find the .mov sibling of a live photo still via name-swap in filecache.
+     * Two simple queries with PHP-side name manipulation avoids CONCAT/LEFT
+     * which are unavailable in SQLite.
      */
     public function findLiveVideoFileId(int $stillFileId): ?int {
         $qb = $this->db->getQueryBuilder();
-        $qb->select('fc2.fileid')
-            ->from('filecache', 'fc1')
-            ->join('fc1', 'filecache', 'fc2',
-                $qb->expr()->andX(
-                    $qb->expr()->eq('fc2.parent', 'fc1.parent'),
-                    $qb->expr()->eq(
-                        'fc2.name',
-                        $qb->createFunction(
-                            "CONCAT(LEFT(fc1.name, LENGTH(fc1.name) - 4), '.mov')"
-                        )
-                    )
-                )
-            )
-            ->where($qb->expr()->eq('fc1.fileid', $qb->createNamedParameter($stillFileId, IQueryBuilder::PARAM_INT)));
+        $qb->select('name', 'parent')
+            ->from('filecache')
+            ->where($qb->expr()->eq('fileid', $qb->createNamedParameter($stillFileId, IQueryBuilder::PARAM_INT)));
 
-        $result = $qb->executeQuery()->fetch();
+        $still = $qb->executeQuery()->fetch();
+        if (!$still || strlen($still['name']) < 5) {
+            return null;
+        }
+
+        $movName = substr($still['name'], 0, -4) . '.mov';
+
+        $qb2 = $this->db->getQueryBuilder();
+        $qb2->select('fileid')
+            ->from('filecache')
+            ->where($qb2->expr()->eq('parent', $qb2->createNamedParameter((int)$still['parent'], IQueryBuilder::PARAM_INT)))
+            ->andWhere($qb2->expr()->eq('name', $qb2->createNamedParameter($movName)));
+
+        $result = $qb2->executeQuery()->fetch();
         return $result ? (int)$result['fileid'] : null;
     }
 
