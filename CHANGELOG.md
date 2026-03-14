@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-03-14
+
+### Fixed
+
+- PostgreSQL: `PARAM_BOOL` passed `"t"`/`"f"` to the `included` column (SMALLINT), causing `invalid input syntax for type smallint` on event detection. Changed to `PARAM_INT` with explicit `1`.
+- PostgreSQL: event detection failed for users with large libraries (`number of parameters must be between 0 and 65535`) because place-name lookup used a single `IN (...)` with one bind parameter per file. Now chunked into batches of 1000.
+
 ## [1.1.2] - 2026-03-14
 
 ### Fixed

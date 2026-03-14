@@ -107,16 +107,20 @@ class EventDetectionService {
             return [];
         }
 
-        $qb = $this->db->getQueryBuilder();
-        $qb->select('mp.fileid', 'pl.name', 'pl.admin_level')
-            ->from('memories_places', 'mp')
-            ->innerJoin('mp', 'memories_planet', 'pl', $qb->expr()->eq('mp.osm_id', 'pl.osm_id'))
-            ->where($qb->expr()->in('mp.fileid', $qb->createNamedParameter($fileIds, IQueryBuilder::PARAM_INT_ARRAY)))
-            ->orderBy('pl.admin_level', 'DESC'); // most specific first
+        // PostgreSQL limits bind parameters to 65535 per query; chunk to stay safe.
+        $rows = [];
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('mp.fileid', 'pl.name', 'pl.admin_level')
+                ->from('memories_places', 'mp')
+                ->innerJoin('mp', 'memories_planet', 'pl', $qb->expr()->eq('mp.osm_id', 'pl.osm_id'))
+                ->where($qb->expr()->in('mp.fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->orderBy('pl.admin_level', 'DESC'); // most specific first
 
-        $result = $qb->executeQuery();
-        $rows   = $result->fetchAll();
-        $result->closeCursor();
+            $result = $qb->executeQuery();
+            $rows   = array_merge($rows, $result->fetchAll());
+            $result->closeCursor();
+        }
 
         // For each fileid, pick the most specific admin level we prefer
         $placeMap = [];
@@ -452,7 +456,7 @@ class EventDetectionService {
                     'event_id' => $insert->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
                     'user_id' => $insert->createNamedParameter($userId),
                     'file_id' => $insert->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-                    'included' => $insert->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+                    'included' => $insert->createNamedParameter(1, IQueryBuilder::PARAM_INT),
                     'sort_order' => $insert->createNamedParameter($order, IQueryBuilder::PARAM_INT),
                 ])
                 ->executeStatement();
@@ -495,7 +499,7 @@ class EventDetectionService {
                     'event_id' => $mqb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
                     'user_id' => $mqb->createNamedParameter($userId),
                     'file_id' => $mqb->createNamedParameter((int)$item['fileid'], IQueryBuilder::PARAM_INT),
-                    'included' => $mqb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+                    'included' => $mqb->createNamedParameter(1, IQueryBuilder::PARAM_INT),
                     'sort_order' => $mqb->createNamedParameter($order, IQueryBuilder::PARAM_INT),
                 ])
                 ->executeStatement();
