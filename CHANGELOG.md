@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-03-14
+
+### Added
+
+- Automated GitHub release packaging workflow for installable artifacts (`reel-<version>.zip` and `reel-<version>.tar.gz`).
+- Automated PHPUnit workflow for pull requests and pushes to `main`.
+- Optional Nextcloud App Store publish step in release workflow (enabled when signing secrets are configured).
+
+### Changed
+
+- Release automation now triggers on both tag pushes and GitHub release publication.
+- Added guardrails to ignore local certificate/private key files in Git.
+- This release includes install-ready archives you can actually download and install.
+
 ## [1.1.0] - 2026-03-14
 
 ### Added

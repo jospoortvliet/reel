@@ -4,7 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+  release:
+    types:
+      - published
   workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -25,11 +32,17 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG_NAME="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.event.release.tag_name }}"
+          fi
+
+          VERSION="${TAG_NAME#v}"
           if [[ -z "$VERSION" || "$VERSION" == "$GITHUB_REF_NAME" ]]; then
             VERSION="$(grep -oPm1 '(?<=<version>)[^<]+' appinfo/info.xml)"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Read package.json node and npm engines version
         uses: skjnldsv/read-package-engines-version-actions@v3
@@ -106,20 +119,21 @@ jobs:
             build/release/*.sha256
 
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(steps.meta.outputs.tag_name, 'v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
           files: |
             build/release/*.tar.gz
             build/release/*.zip
             build/release/*.sha256
 
       - name: Publish signed release to Nextcloud App Store
-        if: startsWith(github.ref, 'refs/tags/v') && secrets.APPSTORE_TOKEN != '' && secrets.APP_PRIVATE_KEY != ''
+        if: startsWith(steps.meta.outputs.tag_name, 'v') && secrets.APPSTORE_TOKEN != '' && secrets.APP_PRIVATE_KEY != ''
         uses: R0Wi/nextcloud-appstore-push-action@v1.0.4
         with:
           app_name: ${{ env.APP_NAME }}
           appstore_token: ${{ secrets.APPSTORE_TOKEN }}
-          download_url: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.APP_NAME }}-${{ steps.meta.outputs.version }}.tar.gz
+          download_url: https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.tag_name }}/${{ env.APP_NAME }}-${{ steps.meta.outputs.version }}.tar.gz
           app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
           nightly: false
