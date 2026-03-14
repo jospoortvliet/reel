@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-14
+
 ### Added
 
 - Unit tests for renderer orientation/window command building behavior.
@@ -20,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Event detection now ignores fast place-label flicker and only splits on location changes after a meaningful pause.
 - Event detection no longer treats weak or tied place majorities as strong enough to force a location split.
 - Apple-style photo rendering now keeps the full image on screen with a soft blurred background instead of hard center-cropping on aspect mismatches.
-- Change setting for video style to be per-event
+- Motion style selection is now per-event.
 
 ## [1.0.0] - 2026-03-14
 
