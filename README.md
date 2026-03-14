@@ -266,8 +266,8 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] **Music** — bundled tracks in `assets/music/` and wired theme-based soundtrack selection in renders
 - [x] **Theme picker UI** — theme selection is available in the event detail header and persists per event
 - [x] **Portrait/square rendering** — FFmpeg filter chain now adapts output dimensions for 16:9, 9:16, and 1:1
-- [ ] **App Store prep** — metadata, screenshots, signing, release workflow
-- [ ] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
+- [x] **App Store prep** — metadata, screenshots, signing, release workflow
+- [x] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
 - [ ] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
 - [ ] **Masonry/aspect-ratio thumbnails** — needs custom thumbnail generation since Nextcloud's preview API crops to square
 - [ ] **Ultra-smooth motion pipeline** — animate on an upscaled working canvas first, then downscale to output at the end (best-quality approach to reduce subpixel jitter)
