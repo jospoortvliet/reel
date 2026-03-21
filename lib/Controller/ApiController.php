@@ -6,6 +6,7 @@ namespace OCA\Reel\Controller;
 
 use OCA\Reel\AppInfo\Application;
 use OCA\Reel\Service\EventDetectionService;
+use OCA\Reel\Service\MemoriesRepository;
 use OCA\Reel\Service\RenderJobService;
 use OCP\AppFramework\Http\Attribute\ApiRoute;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
@@ -28,6 +29,7 @@ class ApiController extends OCSController {
         private ?string               $userId,
         private IRootFolder           $rootFolder,
         private IConfig               $config,
+        private MemoriesRepository    $memoriesRepository,
     ) {
         parent::__construct($appName, $request);
     }
@@ -129,9 +131,9 @@ class ApiController extends OCSController {
 
     #[NoAdminRequired]
     #[ApiRoute(verb: 'PUT', url: '/api/v1/events/{id}')]
-    public function updateEvent(int $id, ?string $title = null, ?string $theme = null, ?string $motion_style = null): DataResponse {
+    public function updateEvent(int $id, ?string $title = null, ?string $theme = null): DataResponse {
         if ($guard = $this->requireUserId()) return $guard;
-        if ($title === null && $theme === null && $motion_style === null) {
+        if ($title === null && $theme === null) {
             return new DataResponse($this->fetchEvent($id));
         }
         $qb = $this->db->getQueryBuilder();
@@ -141,18 +143,11 @@ class ApiController extends OCSController {
             $qb->set('title', $qb->createNamedParameter($title));
         }
         if ($theme !== null) {
-            $allowedThemes = ['default', 'summer', 'minimal'];
+            $allowedThemes = ['acoustic_folk', 'indie_pop', 'cinematic_orchestral'];
             if (!in_array($theme, $allowedThemes, true)) {
-                $theme = 'default';
+                $theme = 'indie_pop';
             }
             $qb->set('theme', $qb->createNamedParameter($theme));
-        }
-        if ($motion_style !== null) {
-            $allowedStyles = ['classic', 'apple_subtle'];
-            if (!in_array($motion_style, $allowedStyles, true)) {
-                $motion_style = 'classic';
-            }
-            $qb->set('motion_style', $qb->createNamedParameter($motion_style));
         }
 
         $qb->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
@@ -231,6 +226,15 @@ class ApiController extends OCSController {
             ], 409);
         }
 
+        // Regenerate path: hide stale previous output while new render is running.
+        $qb = $this->db->getQueryBuilder();
+        $qb->update('reel_events')
+            ->set('video_file_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL))
+            ->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+            ->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($this->userId)))
+            ->executeStatement();
+
         $job = $this->jobService->enqueue($id, $this->userId);
 
         return new DataResponse(['job' => $this->formatJob($job)]);
@@ -303,6 +307,15 @@ class ApiController extends OCSController {
             $row['h']       = (int)($row['h'] ?? 0);
             $row['isvideo'] = (bool)($row['isvideo'] ?? false);
             $row['liveid']  = $row['liveid'] ?? null;
+
+            // Only include liveid if a corresponding live video file actually exists
+            if ($row['liveid']) {
+                $liveVideoFileId = $this->memoriesRepository->findLiveVideoFileId((int)$row['file_id']);
+                if ($liveVideoFileId === null) {
+                    // No live video file found; clear liveid so UI won't show toggle
+                    $row['liveid'] = null;
+                }
+            }
 
             // Resolve use_live_video: explicit override > auto orientation-match rule
             $settings = !empty($row['edit_settings'])

@@ -52,7 +52,14 @@ class RenderJob extends QueuedJob {
                 $userId,
                 function (int $progress) use ($jobId): void {
                     $this->updateJobStatus($jobId, 'running', $progress);
-                }
+                },
+                function (string $message) use ($eventId, $jobId): void {
+                    $this->logger->info('Reel debug: event {event}, job {job}: {msg}', [
+                        'event' => $eventId,
+                        'job' => $jobId,
+                        'msg' => $message,
+                    ]);
+                },
             );
             $this->updateJobStatus($jobId, 'done', 100);
             $this->updateEventVideoFileId($eventId, $userId, $fileId);

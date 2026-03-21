@@ -73,28 +73,62 @@ class MemoriesRepository {
     }
 
     /**
-     * Find the .mov sibling of a live photo still via name-swap in filecache.
-     * Two simple queries with PHP-side name manipulation avoids CONCAT/LEFT
-     * which are unavailable in SQLite.
+     * Find the video sibling of a live photo still.
+     * Prefer matching by Memories liveid, then fall back to sibling filename swap.
      */
     public function findLiveVideoFileId(int $stillFileId): ?int {
+        $qbLive = $this->db->getQueryBuilder();
+        $qbLive->select('liveid')
+            ->from('memories')
+            ->where($qbLive->expr()->eq('fileid', $qbLive->createNamedParameter($stillFileId, IQueryBuilder::PARAM_INT)));
+
+        $stillMem = $qbLive->executeQuery()->fetch();
+        $liveId = is_array($stillMem) ? trim((string)($stillMem['liveid'] ?? '')) : '';
+
+        if ($liveId !== '') {
+            $qbMatch = $this->db->getQueryBuilder();
+            $qbMatch->select('fileid')
+                ->from('memories')
+                ->where($qbMatch->expr()->eq('liveid', $qbMatch->createNamedParameter($liveId)))
+                ->andWhere($qbMatch->expr()->eq('isvideo', $qbMatch->createNamedParameter(1, IQueryBuilder::PARAM_INT)))
+                ->andWhere($qbMatch->expr()->neq('fileid', $qbMatch->createNamedParameter($stillFileId, IQueryBuilder::PARAM_INT)))
+                ->setMaxResults(1);
+
+            $video = $qbMatch->executeQuery()->fetch();
+            if ($video) {
+                return (int)$video['fileid'];
+            }
+        }
+
+        // Fallback for databases without usable liveid metadata.
         $qb = $this->db->getQueryBuilder();
         $qb->select('name', 'parent')
             ->from('filecache')
             ->where($qb->expr()->eq('fileid', $qb->createNamedParameter($stillFileId, IQueryBuilder::PARAM_INT)));
 
         $still = $qb->executeQuery()->fetch();
-        if (!$still || strlen($still['name']) < 5) {
+        if (!$still) {
             return null;
         }
 
-        $movName = substr($still['name'], 0, -4) . '.mov';
+        $baseName = pathinfo((string)$still['name'], PATHINFO_FILENAME);
+        if ($baseName === '') {
+            return null;
+        }
+
+        $candidateNames = [
+            $baseName . '.mov',
+            $baseName . '.MOV',
+            $baseName . '.mp4',
+            $baseName . '.MP4',
+        ];
 
         $qb2 = $this->db->getQueryBuilder();
         $qb2->select('fileid')
             ->from('filecache')
             ->where($qb2->expr()->eq('parent', $qb2->createNamedParameter((int)$still['parent'], IQueryBuilder::PARAM_INT)))
-            ->andWhere($qb2->expr()->eq('name', $qb2->createNamedParameter($movName)));
+            ->andWhere($qb2->expr()->in('name', $qb2->createNamedParameter($candidateNames, IQueryBuilder::PARAM_STR_ARRAY)))
+            ->setMaxResults(1);
 
         $result = $qb2->executeQuery()->fetch();
         return $result ? (int)$result['fileid'] : null;

@@ -263,12 +263,17 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] **Face zoom in Ken Burns** — instead of always zooming to centre, zoom toward the detected face position from Recognize
 - [x] **Live photo duration** — currently capped at `MAX_CLIP_DURATION` (8s); most live photos are 2–3s, should use actual duration from the `.mov` metadata
 - [x] **Video duration UI** — backend now supports segment windows (start + length via `edit_settings`), and users can set clip timing in the event detail view
-- [x] **Music** — bundled tracks in `assets/music/` and wired theme-based soundtrack selection in renders
-- [x] **Theme picker UI** — theme selection is available in the event detail header and persists per event
+- [x] **Music** — bundled tracks in `assets/music/` and wired genre-based soundtrack selection in renders
+- [x] **Music genre picker UI** — genre selection is available in the event detail header and persists per event
 - [x] **Portrait/square rendering** — FFmpeg filter chain now adapts output dimensions for 16:9, 9:16, and 1:1
 - [x] **App Store prep** — metadata, screenshots, signing, release workflow
 - [x] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
 - [x] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
+- [x] adress some rendering bugs
+- [ ] improve the video opening and closing
+- [ ] switch short live clips to image
+- [ ] double check we follow the logic of the animations consistently
+- [ ] change the live photo icon to one more... like a live photo icon!
 - [ ] put limits on the nr of items to limit length (and size) of videos
 - [ ] auto-create videos (with some limits!)
 - [ ] create/detect special types of events - like 'pets in 2025' or an entire vacation in a separate country, or a city trip.

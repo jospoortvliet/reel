@@ -38,7 +38,6 @@ interface Event {
 	date_start: number
 	date_end: number
 	theme: string | null
-	motion_style: string | null
 	video_file_id: number | null
 	cover_file_id?: number | null
 	cover_thumbnail_url: string | null
@@ -87,14 +86,9 @@ const clipLength = ref(2)
 let   pollTimer     = null as ReturnType<typeof setInterval> | null
 
 const themeOptions = [
-	{ value: 'default', label: t('reel', 'Default') },
-	{ value: 'summer', label: t('reel', 'Summer') },
-	{ value: 'minimal', label: t('reel', 'Minimal') },
-]
-
-const motionStyleOptions = [
-	{ value: 'classic', label: t('reel', 'Classic') },
-	{ value: 'apple_subtle', label: t('reel', 'Apple') },
+	{ value: 'acoustic_folk', label: t('reel', 'Acoustic Folk') },
+	{ value: 'indie_pop', label: t('reel', 'Indie Pop') },
+	{ value: 'cinematic_orchestral', label: t('reel', 'Cinematic Orchestral') },
 ]
 
 // -------------------------------------------------------------------------
@@ -147,8 +141,25 @@ async function loadEventById(id: number) {
 
 async function renderEvent() {
 	if (!selectedEvent.value) return
+	const eventId = selectedEvent.value.id
+	const now = Math.floor(Date.now() / 1000)
+
+	// Immediately switch UI into work-in-progress mode on regenerate.
+	selectedEvent.value.video_file_id = null
+	selectedEvent.value.video_path = null
+	selectedEvent.value.job = {
+		id: selectedEvent.value.job?.id ?? -1,
+		event_id: eventId,
+		status: 'pending',
+		progress: 0,
+		error: null,
+		created_at: now,
+		updated_at: now,
+	}
+	startPolling()
+
 	try {
-		const url      = generateOcsUrl(`/apps/reel/api/v1/events/${selectedEvent.value.id}/render`)
+		const url      = generateOcsUrl(`/apps/reel/api/v1/events/${eventId}/render`)
 		const response = await axios.post(url, {}, { params: { format: 'json' } })
 		const job      = response.data?.ocs?.data?.job ?? response.data?.job
 		if (job) {
@@ -156,6 +167,7 @@ async function renderEvent() {
 			startPolling()
 		}
 	} catch (e: any) {
+		await loadEventById(eventId)
 		const msg = e?.response?.data?.ocs?.data?.error ?? t('reel', 'Failed to start render')
 		showError(msg)
 	}
@@ -175,23 +187,6 @@ async function updateEventTheme(theme: string) {
 		showSuccess(t('reel', 'Theme updated'))
 	} catch (e) {
 		showError(t('reel', 'Failed to update theme'))
-	}
-}
-
-async function updateEventMotionStyle(style: string) {
-	if (!selectedEvent.value) return
-	try {
-		const eventId = selectedEvent.value.id
-		const url = generateOcsUrl(`/apps/reel/api/v1/events/${eventId}`)
-		await axios.put(url, { motion_style: style }, { params: { format: 'json' } })
-		selectedEvent.value.motion_style = style
-		const row = events.value.find(e => e.id === eventId)
-		if (row) {
-			row.motion_style = style
-		}
-		showSuccess(t('reel', 'Style updated'))
-	} catch (e) {
-		showError(t('reel', 'Failed to update style'))
 	}
 }
 
@@ -402,23 +397,27 @@ const jobProgress = computed(() => selectedEvent.value?.job?.progress ?? 0)
 const isRendering = computed(() => isJobActive(selectedEvent.value?.job))
 
 const PROGRESS_MESSAGES: [number, string][] = [
-	[0,  '⏳ Waiting for cron to wake up…'],
-	[1,  '🎬 Dusting off the film reel…'],
-	[5,  '🖼️ Judging your photo composition…'],
-	[10, '✂️ Cutting out the blurry ones (probably)…'],
-	[18, '🌍 Consulting the vibe of each location…'],
+	[0,  '⏳ Waiting for the dragon to wake up…'],
+	[5,  '🎬 Dusting off the film reel…'],
+	[10, '🖼️ Judging your photo composition…'],
+	[15, '✂️ Cutting out the blurry ones (probably)…'],
+	[20, '🌍 Consulting the vibe of each location…'],
 	[25, '🎞️ Applying cinematic Ken Burns magic…'],
-	[33, '🍿 Asking pixels to hold still…'],
-	[40, '🧃 Pressing visual juice…'],
-	[48, '🪐 Generating galaxy-brain transitions…'],
-	[55, '🐌 Convincing FFmpeg to go faster…'],
-	[63, '🎨 Colour-correcting your questionable lighting…'],
-	[70, '🌀 Rewinding time (just a little)…'],
-	[78, '🤌 Adding chef\'s kiss to every frame…'],
+	[30, '🍿 Asking pixels to hold still…'],
+	[35, '🧃 Pressing visual juice…'],
+	[40, '🪐 Generating galaxy-brain transitions…'],
+	[45, '🐌 Convincing FFmpeg to go faster…'],
+	[50, '🎨 Colour-correcting your questionable lighting…'],
+	[55, '🌀 Rewinding time (just a little)…'],
+	[60, '🤌 Adding chef\'s kiss to every frame…'],
+	[65, '🦦 Teaching the encoder new tricks…'],
+	[70, '🧲 Pulling frames into alignment…'],
+	[75, '🎭 Coaching the transitions to behave…'],
+	[80, '🔮 Divining the perfect frame rate…'],
 	[85, '🚀 Approaching ludicrous speed…'],
 	[90, '🎼 Stitching it all together…'],
 	[95, '🪄 Applying finishing touches…'],
-	[99, '📦 Wrapping up, nearly there…'],
+	[99, '📦 Wrapping up your gift with a nice bow, nearly there…'],
 ]
 
 const progressMessage = computed(() => {
@@ -533,29 +532,14 @@ watch(() => route.params.id, async (id) => {
 						<p>{{ formatDateRange(selectedEvent.date_start, selectedEvent.date_end) }}</p>
 						<p>{{ includedCount }} {{ t('reel', 'of') }} {{ selectedEvent.media.length }} {{ t('reel', 'items included') }}</p>
 						<div :class="$style.themeRow">
-							<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Music theme') }}</label>
+								<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Music genre') }}</label>
 							<select
 								id="theme-select"
 								:class="$style.themeSelect"
-								:value="selectedEvent.theme ?? 'default'"
-								@change="updateEventTheme(($event.target as HTMLSelectElement).value || 'default')">
+									:value="themeOptions.some((opt) => opt.value === (selectedEvent.theme ?? '')) ? selectedEvent.theme : 'indie_pop'"
+									@change="updateEventTheme(($event.target as HTMLSelectElement).value || 'indie_pop')">
 								<option
 									v-for="opt in themeOptions"
-									:key="opt.value"
-									:value="opt.value">
-									{{ opt.label }}
-								</option>
-							</select>
-						</div>
-						<div :class="$style.themeRow">
-							<label :class="$style.themeLabel" for="style-select">{{ t('reel', 'Motion style') }}</label>
-							<select
-								id="style-select"
-								:class="$style.themeSelect"
-								:value="selectedEvent.motion_style ?? 'classic'"
-								@change="updateEventMotionStyle(($event.target as HTMLSelectElement).value || 'classic')">
-								<option
-									v-for="opt in motionStyleOptions"
 									:key="opt.value"
 									:value="opt.value">
 									{{ opt.label }}
@@ -741,7 +725,7 @@ watch(() => route.params.id, async (id) => {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	z-index: 1200;
+	z-index: 2500;
 	padding: 20px;
 }
 

@@ -46,6 +46,10 @@ class VideoRenderingService {
     private const FFMPEG_TIMEOUT_SECONDS = 1800;
     private const FFMPEG_STDERR_MAX_BYTES = 262144;
     private const TARGET_ASPECT = self::WIDTH / self::HEIGHT;
+    private const MUSIC_BASE_VOLUME = 0.50;
+    private const MUSIC_DUCKED_VOLUME = 1.00;
+    private const MUSIC_FADE_OUT_SECONDS = 2.4;
+    private const AUDIO_CROSSFADE_SECONDS = 0.10;
 
     private int $outputWidth = self::WIDTH;
     private int $outputHeight = self::HEIGHT;
@@ -95,16 +99,10 @@ class VideoRenderingService {
             $outputName      = $this->buildOutputFilename($event);
             $localOutputPath = $tempDir . '/final.mp4';
 
-            $eventMotionStyle = $event['motion_style'] ?? null;
-            $resolvedMotionStyle = in_array($eventMotionStyle, ['classic', 'apple_subtle'], true)
-                ? $eventMotionStyle
-                : $this->getMotionStyle($userId);
-
             $this->concatenateIntermediates(
                 $clips,
                 $localOutputPath,
                 $event['theme'] ?? null,
-                $resolvedMotionStyle,
                 $onDebug,
             );
 
@@ -124,8 +122,8 @@ class VideoRenderingService {
             return $fileId;
 
         } finally {
-            if (!$renderSucceeded && $onDebug) {
-                $onDebug('Preserving temp dir for failed debug render: ' . $tempDir);
+            if ($onDebug) {
+                $onDebug('Debug mode: preserving temp dir ' . $tempDir);
             } else {
                 $this->cleanupTempDir($tempDir);
             }
@@ -143,12 +141,11 @@ class VideoRenderingService {
     private function normalizeItems(array $items, string $tempDir, ?callable $onProgress = null, ?callable $onDebug = null): array {
         $clips = [];
         $total = count($items);
-        $motionStyle = $total > 0 ? (string)($items[0]['motion_style'] ?? 'classic') : 'classic';
 
         for ($index = 0; $index < $total; $index++) {
             $item = $items[$index];
 
-            if ($this->canBuildTriptychSegment($items, $index, $motionStyle)) {
+            if ($this->canBuildTriptychSegment($items, $index)) {
                 $a = $items[$index];
                 $b = $items[$index + 1];
                 $c = $items[$index + 2];
@@ -213,7 +210,7 @@ class VideoRenderingService {
             }
 
             $cmd = $item['is_video']
-                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $item['duration'], (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), $motionStyle)
+                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $item['duration'], (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), 'apple_subtle')
                 : $this->buildPhotoNormalizeCmd($inputPath, $outPath, $item['duration'], $item['motion']);
 
             $this->logger->debug('Reel: normalizing item {i}/{total}', [
@@ -243,11 +240,7 @@ class VideoRenderingService {
         return $clips;
     }
 
-    private function canBuildTriptychSegment(array $items, int $startIndex, string $motionStyle): bool {
-        if ($motionStyle !== 'apple_subtle') {
-            return false;
-        }
-
+    private function canBuildTriptychSegment(array $items, int $startIndex): bool {
         if (!isset($items[$startIndex + 2])) {
             return false;
         }
@@ -272,7 +265,7 @@ class VideoRenderingService {
      * Normalize a video clip to standard intermediate format.
      * Handles any input codec/container.
      */
-    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0, int $videoW = 0, int $videoH = 0, string $motionStyle = 'classic'): array {
+    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0, int $videoW = 0, int $videoH = 0, string $motionStyle = 'apple_subtle'): array {
         $cmd = [
             'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
             '-i', $inputPath,
@@ -317,6 +310,7 @@ class VideoRenderingService {
                     '-filter_complex', $fc,
                     '-map', '[vout]',
                     '-map', '0:a?',
+                    '-af', 'aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS',
                     '-r', (string)self::FPS,
                     '-c:v', 'libx264',
                     '-preset', 'fast',
@@ -333,6 +327,9 @@ class VideoRenderingService {
         return array_merge($cmd, [
             '-t', number_format($duration, 3, '.', ''),
             '-vf', $this->scaleFilter(),
+            '-map', '0:v',
+            '-map', '0:a?',
+            '-af', 'aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS',
             '-r', (string)self::FPS,
             '-c:v', 'libx264',
             '-preset', 'fast',
@@ -352,7 +349,7 @@ class VideoRenderingService {
     private function buildPhotoNormalizeCmd(string $inputPath, string $outputPath, float $duration, array $motion): array {
         $frameCount = (int)ceil($duration * self::FPS);
 
-        $style = (string)($motion['style'] ?? 'classic');
+        $style = (string)($motion['style'] ?? 'apple_subtle');
         $zoomStartRaw = (float)($motion['zoom_start'] ?? 1.0);
         $zoomEndRaw = (float)($motion['zoom_end'] ?? 1.0);
         $zoomStart = number_format($zoomStartRaw, 4, '.', '');
@@ -397,49 +394,28 @@ class VideoRenderingService {
             $appleZoomStartFmt = number_format($appleZoomStart, 4, '.', '');
             $appleZoomEndFmt   = number_format($appleZoomEnd,   4, '.', '');
 
-            // 'on' is zoompan's output frame counter (0-indexed).
-            // easeInOutCubic in terms of on/(frameCount-1):
-            $zpT = "on/{$framesMinusOne}";
-            $zpEase = $this->easeInOutCubicExpr($zpT);
-            $zpZoom = "{$appleZoomStartFmt}+({$appleZoomEndFmt}-{$appleZoomStartFmt})*{$zpEase}";
+            // Per-frame zoom interpolation.
+            $zpZoom = "{$appleZoomStartFmt}+({$appleZoomEndFmt}-{$appleZoomStartFmt})*{$zoomEase}";
 
-            // fx/fy bias: slight off-center offset toward focus point (in input pixel space).
-            // Available slack = fitW - fitW/zoom (changes with zoom). We use fitW/maxZoom for
-            // a representative constant bias offset that scales naturally with zoom level.
-            $fxBias = $this->clamp((((float)($motion['fx'] ?? 0.5)) - 0.5) * 0.4, -0.2, 0.2);
-            $fyBias = $this->clamp((((float)($motion['fy'] ?? 0.5)) - 0.5) * 0.4, -0.2, 0.2);
-            $biasX  = number_format($fxBias * $fitW * 0.02, 2, '.', '');
-            $biasY  = number_format($fyBias * $fitH * 0.02, 2, '.', '');
-
-            // zoompan x/y = top-left corner of the visible window in the input (fitW×fitH) space.
-            // Center + bias:  x = iw/2 - iw/(2*zoom) + bias
-            $zpCenterX = "iw/2-(iw/zoom/2)";
-            $zpCenterY = "ih/2-(ih/zoom/2)";
-
-            if ($mode === 'pan_x') {
-                // Pan from left to right across the zoomed canvas.
-                // Available horizontal travel = iw - iw/zoom = iw*(1-1/zoom)
-                $zpX = "max(0,iw*(1-1/zoom)*{$zpEase}+{$biasX})";
-                $zpY = "max(0,{$zpCenterY}+{$biasY})";
-            } elseif ($mode === 'pan_y') {
-                $zpX = "max(0,{$zpCenterX}+{$biasX})";
-                $zpY = "max(0,ih*(1-1/zoom)*{$zpEase}+{$biasY})";
-            } else {
-                $zpX = "max(0,{$zpCenterX}+{$biasX})";
-                $zpY = "max(0,{$zpCenterY}+{$biasY})";
-            }
+            $focusX = number_format($this->clamp((float)($motion['fx'] ?? 0.5), 0.12, 0.88), 4, '.', '');
+            $focusY = number_format($this->clamp((float)($motion['fy'] ?? 0.5), 0.12, 0.88), 4, '.', '');
 
             // Overlay is constant: fit box always centered in output frame.
             $overlayX = (int)(($outW - $fitW) / 2);
             $overlayY = (int)(($outH - $fitH) / 2);
 
             $fitScale = "scale=w={$fitW}:h={$fitH}:flags=lanczos";
-            $zpFilter = "zoompan=z='{$zpZoom}':x='{$zpX}':y='{$zpY}':d={$frameCount}:s={$fitW}x{$fitH}:fps=" . self::FPS;
+            // Animated scale + crop avoids zoompan coordinate stepping jitter.
+            $animatedScale = "scale=w='trunc(iw*({$zpZoom})/2)*2':h='trunc(ih*({$zpZoom})/2)*2':flags=lanczos:eval=frame";
+            // Keep zoom centered on the focus point, then clamp to image bounds.
+            $cropX = "max(0,min(iw-{$fitW},iw*({$focusX})-{$fitW}/2))";
+            $cropY = "max(0,min(ih-{$fitH},ih*({$focusY})-{$fitH}/2))";
+            $animatedCrop = "crop={$fitW}:{$fitH}:'{$cropX}':'{$cropY}'";
 
             $fc = implode(';', [
                 "[0:v]split=2[bgsrc][fgsrc]",
                 "[bgsrc]scale=w={$outW}:h={$outH}:force_original_aspect_ratio=increase,crop={$outW}:{$outH},gblur=sigma=36,eq=saturation=0.92:brightness=-0.02[bg]",
-                "[fgsrc]{$fitScale},{$zpFilter}[fg]",
+                "[fgsrc]{$fitScale},{$animatedScale},{$animatedCrop}[fg]",
                 "[bg][fg]overlay=x={$overlayX}:y={$overlayY},setsar=1[vout]",
             ]);
 
@@ -591,14 +567,14 @@ class VideoRenderingService {
     // Pass 2: Concatenate intermediates into final output
     // -------------------------------------------------------------------------
 
-    private function concatenateIntermediates(array $clips, string $outputPath, ?string $theme, string $motionStyle, ?callable $onDebug = null): void {
+    private function concatenateIntermediates(array $clips, string $outputPath, ?string $theme, ?callable $onDebug = null): void {
         $count = count($clips);
 
         if ($count === 0) {
             throw new \RuntimeException('No clips to concatenate');
         }
 
-        if ($motionStyle === 'apple_subtle' && $count > 1) {
+        if ($count > 1) {
             $this->concatenateWithTransitions($clips, $outputPath, $theme, $onDebug);
             return;
         }
@@ -617,6 +593,12 @@ class VideoRenderingService {
 
         $musicPath = $this->getMusicPath($theme);
         $hasMusic  = $musicPath && file_exists($musicPath);
+        $targetDuration = array_sum(array_map(static fn(array $clip): float => (float)($clip['duration'] ?? 0.0), $clips));
+        $fadeDuration = min(self::MUSIC_FADE_OUT_SECONDS, max(0.0, $targetDuration));
+        $fadeStart = max(0.0, $targetDuration - $fadeDuration);
+        $fadeDurationStr = number_format($fadeDuration, 3, '.', '');
+        $fadeStartStr = number_format($fadeStart, 3, '.', '');
+        $targetDurationStr = number_format(max(0.0, $targetDuration), 3, '.', '');
 
         $cmd = ['ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
             '-f', 'concat',
@@ -628,7 +610,13 @@ class VideoRenderingService {
             $cmd = array_merge($cmd, [
                 '-stream_loop', '-1',
                 '-i', $musicPath,
-                '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=first:weights=1 0.3[aout]',
+                '-filter_complex',
+                '[1:a]aresample=async=1:first_pts=0,atrim=duration=' . $targetDurationStr
+                    . ',volume=' . self::MUSIC_BASE_VOLUME
+                    . ',afade=t=out:st=' . $fadeStartStr . ':d=' . $fadeDurationStr . '[music];'
+                    . '[0:a]asplit=2[nat_mix][nat_sc];'
+                    . '[music][nat_sc]sidechaincompress=threshold=0.03:ratio=7:attack=20:release=250[ducked];'
+                    . '[ducked][nat_mix]amix=inputs=2:duration=longest:dropout_transition=0:weights=' . self::MUSIC_DUCKED_VOLUME . ' 1:normalize=0[aout]',
                 '-map', '0:v',
                 '-map', '[aout]',
             ]);
@@ -679,15 +667,15 @@ class VideoRenderingService {
 
         $accumulated = (float)$clips[0]['duration'];
         $videoLabel = 'v0';
-        $audioLabel = '0:a';
+        $audioLabel = '';
+        $transitionDurations = array_fill(0, max(0, $count - 1), 0.0);
 
         for ($i = 1; $i < $count; $i++) {
             $transitionSpec = $this->pickTransitionSpec($clips[$i - 1], $clips[$i], $i);
             $transitionDuration = (float)$transitionSpec['duration'];
+            $transitionDurations[$i - 1] = $transitionDuration;
             $offset = max(0.0, $accumulated - $transitionDuration);
             $newVideoLabel = 'vx' . $i;
-            $newAudioLabel = 'ax' . $i;
-
             if (($transitionSpec['type'] ?? '') === 'triptych_strip') {
                 $invert = !empty($transitionSpec['invert']);
                 $leftDir = $invert ? 'wiperight' : 'wipeleft';
@@ -724,16 +712,49 @@ class VideoRenderingService {
                 $filterParts[] = "[{$videoLabel}][v{$i}]xfade=transition={$transition}:duration={$transitionDuration}:offset=" . number_format($offset, 3, '.', '') . "[{$newVideoLabel}]";
             }
 
-            $filterParts[] = "[{$audioLabel}][{$i}:a]acrossfade=d={$transitionDuration}:c1=tri:c2=tri[{$newAudioLabel}]";
-
             $accumulated += (float)$clips[$i]['duration'] - $transitionDuration;
             $videoLabel = $newVideoLabel;
+        }
+
+        $audioInputs = [];
+        $audioDurations = [];
+        for ($i = 0; $i < $count; $i++) {
+            $leftTransition = $i > 0 ? (float)$transitionDurations[$i - 1] : 0.0;
+            $rightTransition = $i < ($count - 1) ? (float)$transitionDurations[$i] : 0.0;
+            $rawAudioDuration = (float)$clips[$i]['duration'] - ($leftTransition / 2.0) - ($rightTransition / 2.0);
+            $audioDuration = max(0.05, $rawAudioDuration);
+            $audioDurations[] = $audioDuration;
+            $audioDurationStr = number_format($audioDuration, 3, '.', '');
+            $filterParts[] = "[{$i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=duration={$audioDurationStr},asetpts=PTS-STARTPTS[a{$i}]";
+            $audioInputs[] = "[a{$i}]";
+        }
+
+        // Add a subtle audio fade between adjacent clip segments.
+        // Use non-overlapping mode (o=0) so total audio duration remains aligned
+        // with the visual timeline and doesn't shrink by fade lengths.
+        $audioLabel = 'a0';
+        for ($i = 1; $i < $count; $i++) {
+            $maxFadeByLen = min((float)$audioDurations[$i - 1], (float)$audioDurations[$i]) * 0.45;
+            $crossfade = max(0.02, min(self::AUDIO_CROSSFADE_SECONDS, $maxFadeByLen));
+            $crossfadeStr = number_format($crossfade, 3, '.', '');
+            $newAudioLabel = 'ax' . $i;
+            $filterParts[] = "[{$audioLabel}][a{$i}]acrossfade=d={$crossfadeStr}:o=0:c1=tri:c2=tri[{$newAudioLabel}]";
             $audioLabel = $newAudioLabel;
         }
 
         if ($hasMusic) {
             $musicInputIndex = $count;
-            $filterParts[] = "[{$audioLabel}][{$musicInputIndex}:a]amix=inputs=2:duration=first:weights=1 0.26[aout]";
+            $fadeDuration = min(self::MUSIC_FADE_OUT_SECONDS, max(0.0, $accumulated));
+            $fadeStart = max(0.0, $accumulated - $fadeDuration);
+            $filterParts[] = "[{$musicInputIndex}:a]aresample=async=1:first_pts=0,atrim=duration="
+                . number_format($accumulated, 3, '.', '')
+                . ",volume=" . self::MUSIC_BASE_VOLUME
+                . ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '')
+                . ":d=" . number_format($fadeDuration, 3, '.', '')
+                . "[music]";
+            $filterParts[] = "[{$audioLabel}]asplit=2[acat_mix][acat_sc]";
+            $filterParts[] = "[music][acat_sc]sidechaincompress=threshold=0.03:ratio=7:attack=20:release=250[ducked]";
+            $filterParts[] = "[ducked][acat_mix]amix=inputs=2:duration=longest:dropout_transition=0:weights=" . self::MUSIC_DUCKED_VOLUME . " 1:normalize=0[aout]";
             $audioLabel = 'aout';
         }
 
@@ -973,7 +994,6 @@ class VideoRenderingService {
         $items = [];
         $fileIds = array_map(static fn(array $row): int => (int)$row['file_id'], $media);
         $faceMap = $this->memoriesRepository->loadFaceDetections($fileIds, $userId);
-        $motionStyle = $this->getMotionStyle($userId);
         $subtleRunMotion = null;
         $subtleRunRemaining = 0;
         $lastSubtleRunMotion = null;
@@ -993,32 +1013,6 @@ class VideoRenderingService {
             try {
                 $fileId = (int)$row['file_id'];
                 $useLive = !empty($row['use_live_video']) && !empty($row['liveid']);
-
-                // Smart fallback: for strong still/output aspect mismatch, prefer still photo
-                // even when live video was selected, so motion framing can better use image area.
-                if ($useLive) {
-                    $stillFiles = $userFolder->getById((int)$row['file_id']);
-                    if (!empty($stillFiles)) {
-                        $stillLocalPath = $this->getLocalPath($stillFiles[0]);
-                        if (file_exists($stillLocalPath)) {
-                            $stillDims = $this->resolveImageDimensions(
-                                $stillLocalPath,
-                                (int)($row['w'] ?? 0),
-                                (int)($row['h'] ?? 0),
-                            );
-                            $stillAspect = ($stillDims['h'] > 0)
-                                ? ($stillDims['w'] / $stillDims['h'])
-                                : $targetAspect;
-
-                            if ($this->isStrongAspectMismatch($stillAspect, $targetAspect)) {
-                                $useLive = false;
-                                $this->logger->debug('Reel: preferring still over live video due aspect mismatch for file {id}', [
-                                    'id' => (int)$row['file_id'],
-                                ]);
-                            }
-                        }
-                    }
-                }
 
                 // If live video requested, try to find the .mov sibling via name-swap
                 if ($useLive) {
@@ -1060,12 +1054,10 @@ class VideoRenderingService {
 
                 if ($isVideo) {
                     $motion = [];
-                    if ($motionStyle === 'apple_subtle') {
-                        // Video/live clips are "breakers" that reset subtle run grouping.
-                        $subtleRunMotion = null;
-                        $subtleRunRemaining = 0;
-                    }
-                } elseif ($motionStyle === 'apple_subtle') {
+                    // Video/live clips are "breakers" that reset subtle run grouping.
+                    $subtleRunMotion = null;
+                    $subtleRunRemaining = 0;
+                } else {
                     if ($subtleRunMotion === null || $subtleRunRemaining <= 0) {
                         [$subtleRunMotion, $subtleRunRemaining] = $this->pickNextSubtleRun($lastSubtleRunMotion, (int)$row['file_id']);
                         $lastSubtleRunMotion = $subtleRunMotion;
@@ -1086,20 +1078,6 @@ class VideoRenderingService {
                     $dimH = (int)$dims['h'];
                     $motion['image_aspect'] = ($dimH > 0) ? ($dimW / $dimH) : $this->targetAspect();
                     $subtleRunRemaining--;
-                } else {
-                    $motion = $this->buildPhotoMotion(
-                        (int)$row['file_id'],
-                        $faceMap[(int)$row['file_id']] ?? [],
-                        (int)$dims['w'],
-                        (int)$dims['h'],
-                        $interestingFocus,
-                        $this->getPanMismatchThreshold($userId),
-                        $this->getPanSweepMargin($userId),
-                        $this->getPanoramaSweepMargin($userId),
-                        $this->getFaceZoomTargetFill($userId),
-                        $this->getNonFaceZoomEnd($userId),
-                    );
-                    $motion['style'] = 'classic';
                 }
 
                 $duration = $isVideo
@@ -1116,7 +1094,7 @@ class VideoRenderingService {
                     $sourceH = (int)$dims['h'];
                     $sourceAspect = $sourceH > 0 ? ($sourceW / $sourceH) : 0.0;
                     $mode = $isVideo ? 'video' : (string)($motion['mode'] ?? 'zoom');
-                    $style = $isVideo ? 'video' : (string)($motion['style'] ?? 'classic');
+                    $style = $isVideo ? 'video' : (string)($motion['style'] ?? 'apple_subtle');
                     $panEngine = $isVideo ? 'none' : (string)($motion['pan_engine'] ?? 'none');
                     $msg = sprintf(
                         '  Motion debug: file_id=%d src=%dx%d aspect=%.4f style=%s mode=%s pan_engine=%s zoom=%.3f->%.3f fx=%.4f',
@@ -1169,7 +1147,6 @@ class VideoRenderingService {
                     'start_at' => $videoStartAt,
                     'w' => (int)$dims['w'],
                     'h' => (int)$dims['h'],
-                    'motion_style' => $motionStyle,
                     'liveid'   => $row['liveid'],
                     'motion'   => $motion,
                 ];
@@ -1185,7 +1162,7 @@ class VideoRenderingService {
     }
 
     private function pickNextSubtleRun(?string $lastMotion, int $fileId): array {
-        $motions = ['zoom_in', 'zoom_out', 'pan_left', 'pan_right'];
+        $motions = ['zoom_in', 'zoom_out'];
         $idx = abs((int)crc32($fileId . ':motion')) % count($motions);
         $motion = $motions[$idx];
         if ($lastMotion !== null && $motion === $lastMotion) {
@@ -1647,40 +1624,6 @@ class VideoRenderingService {
         return $this->outputWidth() / max(1, $this->outputHeight());
     }
 
-    private function getPanMismatchThreshold(string $userId): float {
-        return $this->getFloatUserSetting($userId, 'pan_mismatch_threshold', 1.40, 1.05, 2.50);
-    }
-
-    private function getMotionStyle(string $userId): string {
-        $raw = $this->config->getUserValue($userId, Application::APP_ID, 'motion_style', 'classic');
-        return in_array($raw, ['classic', 'apple_subtle'], true) ? $raw : 'classic';
-    }
-
-    private function getPanSweepMargin(string $userId): float {
-        return $this->getFloatUserSetting($userId, 'pan_sweep_margin', 0.08, 0.00, 0.50);
-    }
-
-    private function getPanoramaSweepMargin(string $userId): float {
-        return $this->getFloatUserSetting($userId, 'pan_panorama_sweep_margin', 0.02, 0.00, 0.50);
-    }
-
-    private function getFaceZoomTargetFill(string $userId): float {
-        return $this->getFloatUserSetting($userId, 'face_zoom_target_fill', 0.75, 0.55, 0.95);
-    }
-
-    private function getNonFaceZoomEnd(string $userId): float {
-        return $this->getFloatUserSetting($userId, 'non_face_zoom_end', 1.42, 1.05, 1.80);
-    }
-
-    private function getFloatUserSetting(string $userId, string $key, float $default, float $min, float $max): float {
-        $raw = $this->config->getUserValue($userId, Application::APP_ID, $key, (string)$default);
-        if (!is_numeric($raw)) {
-            return $default;
-        }
-
-        return $this->clamp((float)$raw, $min, $max);
-    }
-
     /**
      * Lightweight saliency approximation: pick the highest-detail tile in a dense grid.
      */
@@ -1920,15 +1863,31 @@ class VideoRenderingService {
 
     private function getMusicPath(?string $theme): ?string {
         $appDir = dirname(__DIR__, 2);
-        $track  = match($theme) {
-            'summer'  => 'summer.mp3',
-            'minimal' => 'minimal.mp3',
-            default   => 'default.mp3',
+        $musicDir = $appDir . '/assets/music';
+        $genre = $this->normalizeMusicGenre($theme);
+
+        $candidates = match($genre) {
+            'acoustic_folk' => glob($musicDir . '/Acoustic Folk song *.mp3') ?: [],
+            'cinematic_orchestral' => glob($musicDir . '/Cinematic Orchestral song *.mp3') ?: [],
+            default => glob($musicDir . '/Indie Pop song *.mp3') ?: [],
         };
 
-        return file_exists($appDir . '/assets/music/' . $track)
-            ? $appDir . '/assets/music/' . $track
-            : null;
+        if (empty($candidates)) {
+            return null;
+        }
+
+        $index = random_int(0, count($candidates) - 1);
+        return (string)$candidates[$index];
+    }
+
+    private function normalizeMusicGenre(?string $theme): string {
+        return match($theme) {
+            'acoustic_folk', 'indie_pop', 'cinematic_orchestral' => $theme,
+            // Backwards compatibility for old themes.
+            'summer' => 'acoustic_folk',
+            'minimal' => 'cinematic_orchestral',
+            default => 'indie_pop',
+        };
     }
 
     // -------------------------------------------------------------------------

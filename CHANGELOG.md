@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.8] - 2026-03-21
+
+### Changed
+
+- Music selection switched from legacy themes to genre-based tracks (`acoustic_folk`, `indie_pop`, `cinematic_orchestral`) with randomized per-render track choice.
+- Settings/UI cleanup: removed legacy motion-style engine controls and related backend settings paths to keep a single, consistent motion pipeline.
+- Rendering debug mode now preserves temp render directories on successful runs as well, making FFmpeg/intermediate inspection easier.
+
+### Fixed
+
+- Fixed live-photo clip resolution by preferring `memories.liveid` matching and adding robust filename fallback (`.mov`/`.mp4`, mixed case).
+- Fixed UI live-photo affordances: when no actual live-video sibling exists, the API now suppresses live toggle/icon behavior.
+- Fixed multiple audio-chain issues in transition renders: corrected filter pad reuse with `asplit`, stabilized timeline handling, and aligned clip audio trimming with transition overlap.
+- Fixed missing natural audio on later clips and end-of-video silence regressions in multi-clip renders.
+- Improved audio transitions with gentle clip-to-clip fades and rebalanced natural-vs-music mix toward a more even blend.
+- Fixed regenerate UX: starting a new render now immediately switches to in-progress state and clears stale “video ready” state until the new render completes.
+
 ## [1.1.7] - 2026-03-15
+
+### Changed
+
+- Removed alternate rendering mode to focus on one way of animating videos
 
 ### Performance
 
