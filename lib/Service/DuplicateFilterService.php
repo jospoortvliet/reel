@@ -16,7 +16,7 @@ use Psr\Log\LoggerInterface;
  *
  * Detects near-duplicate photos within an event using two conditions:
  *   1. Time proximity  — photos taken within burst_gap_seconds of each other
- *   2. Visual similarity — blurhash Hamming distance below similarity_threshold
+ *   2. Visual similarity — S below similarity_threshold
  *
  * Winner selection within a duplicate group:
  *   1. Highest face composition score (Recognize face size x centrality)
@@ -65,7 +65,7 @@ class DuplicateFilterService {
      *   'thresholds' => ['burst_gap' => int, 'similarity' => int],
      * ]
      */
-    public function analyseEvent(int $eventId, string $userId): array {
+    public function analyseEvent(int $eventId, string $userId, ?callable $onDebug = null): array {
         $photos    = $this->loadPhotos($eventId, $userId);
         $burstGap  = $this->burstGapSeconds($userId);
         $simThresh = $this->similarityThreshold($userId);
@@ -77,6 +77,24 @@ class DuplicateFilterService {
         $fileIds    = array_column($photos, 'file_id');
         $blurhashes = $this->loadBlurhashes($fileIds);
         $bursts     = $this->detectBursts($photos, $blurhashes, $userId);
+
+        $missingHashes = 0;
+        foreach ($photos as $photo) {
+            if (!isset($blurhashes[(int)$photo['file_id']])) {
+                $missingHashes++;
+            }
+        }
+        if ($onDebug !== null) {
+            $onDebug(sprintf(
+                'duplicate event=%d photos=%d bursts=%d missing_hash=%d burst_gap=%d sim_thresh=%d',
+                $eventId,
+                count($photos),
+                count($bursts),
+                $missingHashes,
+                $burstGap,
+                $simThresh
+            ));
+        }
 
         $report = [];
         foreach ($bursts as $burst) {
@@ -97,6 +115,16 @@ class DuplicateFilterService {
                 'excluded' => $excluded,
                 'method'   => $method,
             ];
+
+            if ($onDebug !== null) {
+                $onDebug(sprintf(
+                    'duplicate burst winner=%d excluded=%d method=%s files=%s',
+                    $winnerId,
+                    count($excluded),
+                    $method,
+                    implode(',', array_map(static fn(array $p): string => (string)$p['file_id'], $burst))
+                ));
+            }
         }
 
         return [
@@ -110,8 +138,8 @@ class DuplicateFilterService {
      * Calls analyseEvent() for the detection logic, then writes exclusions to DB.
      * Returns the number of items marked as excluded.
      */
-    public function filterEvent(int $eventId, string $userId): int {
-        $analysis = $this->analyseEvent($eventId, $userId);
+    public function filterEvent(int $eventId, string $userId, ?callable $onDebug = null): int {
+        $analysis = $this->analyseEvent($eventId, $userId, $onDebug);
 
         $excluded = [];
         foreach ($analysis['bursts'] as $burst) {
@@ -119,6 +147,9 @@ class DuplicateFilterService {
         }
 
         if (empty($excluded)) {
+            if ($onDebug !== null) {
+                $onDebug(sprintf('duplicate event=%d excluded=0', $eventId));
+            }
             return 0;
         }
 
@@ -128,6 +159,10 @@ class DuplicateFilterService {
             'n'  => count($excluded),
             'id' => $eventId,
         ]);
+
+        if ($onDebug !== null) {
+            $onDebug(sprintf('duplicate event=%d excluded=%d', $eventId, count($excluded)));
+        }
 
         return count($excluded);
     }

@@ -131,6 +131,7 @@ class EventDetectionService {
         private IDBConnection        $db,
         private LoggerInterface      $logger,
         private DuplicateFilterService $duplicateFilter,
+        private DistinctFilterService $distinctFilter,
         private MemoriesRepository   $memoriesRepository,
         private IRootFolder          $rootFolder,
         private MusicService         $musicService,
@@ -1584,15 +1585,21 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             throw $e;
         }
 
-        // Apply duplicate suppression only to the normal timeline events.
-        if ($eventKind === self::EVENT_KIND_TIMELINE) {
-            $excluded = $this->duplicateFilter->filterEvent($eventId, $userId);
-            if ($excluded > 0) {
-                $this->logger->debug('Reel: excluded {n} duplicates from new event {id}', [
-                    'n' => $excluded,
-                    'id' => $eventId,
-                ]);
-            }
+        // Duplicate suppression is useful for all event kinds.
+        $excluded = $this->duplicateFilter->filterEvent($eventId, $userId, $this->debugCallback);
+        if ($excluded > 0) {
+            $this->logger->debug('Reel: excluded {n} duplicates from new event {id}', [
+                'n' => $excluded,
+                'id' => $eventId,
+            ]);
+        }
+
+        $distinctExcluded = $this->distinctFilter->filterEvent($eventId, $userId, $this->debugCallback);
+        if ($distinctExcluded > 0) {
+            $this->logger->debug('Reel: excluded {n} low-distinct media from new event {id}', [
+                'n' => $distinctExcluded,
+                'id' => $eventId,
+            ]);
         }
 
         return $eventId;

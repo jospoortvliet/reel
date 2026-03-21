@@ -75,9 +75,11 @@ interface SubEvent {
 	location: string | null
 	video_file_id: number | null
 	media_count: number
+	cover_file_id: number | null
 }
 
 interface EventDetail extends Event {
+	parent_event_id?: number | null
 	video_path: string | null
 	media: MediaItem[]
 	sub_events?: SubEvent[]
@@ -154,6 +156,10 @@ async function selectEvent(event: Event) {
 }
 
 function backToList() {
+	if (selectedEvent.value?.parent_event_id) {
+		router.push({ name: 'event', params: { id: selectedEvent.value.parent_event_id } })
+		return
+	}
 	router.push({ name: 'list' })
 }
 
@@ -568,7 +574,9 @@ watch(() => route.params.id, async (id) => {
 			<!-- Event detail -->
 			<div v-else :class="$style.detail">
 				<div :class="$style.backRow">
-					<NcButton @click="backToList">← {{ t('reel', 'All Events') }}</NcButton>
+					<NcButton @click="backToList">
+						← {{ selectedEvent.parent_event_id ? t('reel', 'Parent event') : t('reel', 'All Events') }}
+					</NcButton>
 				</div>
 
 				<div :class="$style.detailHeader">
@@ -646,15 +654,26 @@ watch(() => route.params.id, async (id) => {
 						<div
 							v-for="sub in selectedEvent.sub_events"
 							:key="sub.id"
-							:class="$style.subEventCard">
-							<div>
+							:class="$style.subEventCard"
+							role="button"
+							tabindex="0"
+							@click="openSubEvent(sub.id)"
+							@keydown.enter.prevent="openSubEvent(sub.id)"
+							@keydown.space.prevent="openSubEvent(sub.id)">
+							<div :class="$style.subEventCover">
+								<img
+									v-if="sub.cover_file_id"
+									:src="thumbnailUrl(sub.cover_file_id, 240, 160)"
+									:class="$style.subEventCoverImg" />
+								<div v-else :class="$style.subEventCoverPlaceholder">
+									<span :class="[$style.ncIcon, 'icon-video']" aria-hidden="true" />
+								</div>
+							</div>
+							<div :class="$style.subEventBody">
 								<h4 :class="$style.subEventTitle">{{ sub.title }}</h4>
 								<p :class="$style.subEventMeta">{{ formatDateRange(sub.date_start, sub.date_end) }}</p>
 								<p :class="$style.subEventMeta">{{ sub.media_count }} {{ t('reel', 'items') }}</p>
 							</div>
-							<NcButton @click="openSubEvent(sub.id)">
-								{{ t('reel', 'Open') }}
-							</NcButton>
 						</div>
 					</div>
 				</div>
@@ -1013,14 +1032,48 @@ watch(() => route.params.id, async (id) => {
 }
 
 .subEventCard {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
+	display: grid;
+	grid-template-columns: 96px 1fr;
 	gap: 10px;
 	background: var(--color-main-background);
 	border: 1px solid var(--color-border);
 	border-radius: var(--border-radius);
-	padding: 10px 12px;
+	padding: 8px;
+	cursor: pointer;
+	transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.subEventCard:hover,
+.subEventCard:focus {
+	border-color: var(--color-primary-element);
+	box-shadow: 0 1px 8px var(--color-box-shadow);
+	outline: none;
+}
+
+.subEventCover {
+	height: 72px;
+	border-radius: var(--border-radius);
+	overflow: hidden;
+	background: var(--color-background-dark);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.subEventCoverImg {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: block;
+}
+
+.subEventCoverPlaceholder {
+	opacity: 0.45;
+	font-size: 1.3rem;
+}
+
+.subEventBody {
+	min-width: 0;
 }
 
 .subEventTitle {

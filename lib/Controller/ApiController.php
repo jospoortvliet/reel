@@ -378,17 +378,51 @@ class ApiController extends OCSController {
             ->addOrderBy('e.id', 'ASC');
 
         $rows = $qb->executeQuery()->fetchAll();
-        return array_map(static function (array $row): array {
+        $covers = $this->loadCoverFileIds(array_map('intval', array_column($rows, 'id')));
+
+        return array_map(static function (array $row) use ($covers): array {
+            $eventId = (int)$row['id'];
             return [
-                'id' => (int)$row['id'],
+                'id' => $eventId,
                 'title' => (string)$row['title'],
                 'date_start' => (int)$row['date_start'],
                 'date_end' => (int)$row['date_end'],
                 'location' => $row['location'] ?? null,
                 'video_file_id' => $row['video_file_id'] !== null ? (int)$row['video_file_id'] : null,
                 'media_count' => (int)($row['media_count'] ?? 0),
+                'cover_file_id' => $covers[$eventId] ?? null,
             ];
         }, $rows);
+    }
+
+    /**
+     * @param array<int> $eventIds
+     * @return array<int, int>
+     */
+    private function loadCoverFileIds(array $eventIds): array {
+        if (empty($eventIds)) {
+            return [];
+        }
+
+        $covers = [];
+        foreach (array_chunk($eventIds, 1000) as $chunk) {
+            $cqb = $this->db->getQueryBuilder();
+            $cqb->select('event_id', 'file_id')
+                ->from('reel_event_media')
+                ->where($cqb->expr()->in('event_id', $cqb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->andWhere($cqb->expr()->eq('included', $cqb->createNamedParameter(1, IQueryBuilder::PARAM_INT)))
+                ->orderBy('event_id', 'ASC')
+                ->addOrderBy('sort_order', 'ASC');
+
+            foreach ($cqb->executeQuery()->fetchAll() as $coverRow) {
+                $eventId = (int)$coverRow['event_id'];
+                if (!isset($covers[$eventId])) {
+                    $covers[$eventId] = (int)$coverRow['file_id'];
+                }
+            }
+        }
+
+        return $covers;
     }
 
     private function loadEditSettings(int $eventId, int $fileId): array {
