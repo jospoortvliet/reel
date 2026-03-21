@@ -71,6 +71,12 @@ interface EventDetail extends Event {
 	media: MediaItem[]
 }
 
+interface MusicOption {
+	value: string
+	label: string
+	kind: 'genre' | 'custom'
+}
+
 // -------------------------------------------------------------------------
 // State
 // -------------------------------------------------------------------------
@@ -85,11 +91,12 @@ const clipStart = ref(0)
 const clipLength = ref(2)
 let   pollTimer     = null as ReturnType<typeof setInterval> | null
 
-const themeOptions = [
-	{ value: 'acoustic_folk', label: t('reel', 'Acoustic Folk') },
-	{ value: 'indie_pop', label: t('reel', 'Indie Pop') },
-	{ value: 'cinematic_orchestral', label: t('reel', 'Cinematic Orchestral') },
+const defaultThemeOptions: MusicOption[] = [
+	{ value: 'acoustic_folk', label: t('reel', 'Acoustic Folk (random)'), kind: 'genre' },
+	{ value: 'indie_pop', label: t('reel', 'Indie Pop (random)'), kind: 'genre' },
+	{ value: 'cinematic_orchestral', label: t('reel', 'Cinematic Orchestral (random)'), kind: 'genre' },
 ]
+const musicOptions = ref<MusicOption[]>([...defaultThemeOptions])
 
 // -------------------------------------------------------------------------
 // Data fetching
@@ -106,6 +113,21 @@ async function loadEvents() {
 		showError(t('reel', 'Failed to load events'))
 	} finally {
 		loading.value = false
+	}
+}
+
+async function loadMusicOptions() {
+	try {
+		const url = generateOcsUrl('/apps/reel/api/v1/music/options')
+		const response = await axios.get(url, { params: { format: 'json' } })
+		const data = response.data?.ocs?.data ?? response.data
+		if (Array.isArray(data) && data.length > 0) {
+			musicOptions.value = data
+		} else {
+			musicOptions.value = [...defaultThemeOptions]
+		}
+	} catch {
+		musicOptions.value = [...defaultThemeOptions]
 	}
 }
 
@@ -184,9 +206,9 @@ async function updateEventTheme(theme: string) {
 		if (row) {
 			row.theme = theme
 		}
-		showSuccess(t('reel', 'Theme updated'))
+		showSuccess(t('reel', 'Music selection updated'))
 	} catch (e) {
-		showError(t('reel', 'Failed to update theme'))
+		showError(t('reel', 'Failed to update music selection'))
 	}
 }
 
@@ -437,6 +459,7 @@ const thumbnailUrl = (fileId: number, x: number, y: number) => generateUrl(`/cor
 // -------------------------------------------------------------------------
 
 onMounted(async () => {
+	await loadMusicOptions()
 	await loadEvents()
 	// Handle direct navigation to /events/:id (deep link / page refresh)
 	const id = route.params.id
@@ -532,14 +555,14 @@ watch(() => route.params.id, async (id) => {
 						<p>{{ formatDateRange(selectedEvent.date_start, selectedEvent.date_end) }}</p>
 						<p>{{ includedCount }} {{ t('reel', 'of') }} {{ selectedEvent.media.length }} {{ t('reel', 'items included') }}</p>
 						<div :class="$style.themeRow">
-								<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Music genre') }}</label>
+								<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Soundtrack') }}</label>
 							<select
 								id="theme-select"
 								:class="$style.themeSelect"
-									:value="themeOptions.some((opt) => opt.value === (selectedEvent.theme ?? '')) ? selectedEvent.theme : 'indie_pop'"
+									:value="musicOptions.some((opt) => opt.value === (selectedEvent.theme ?? '')) ? selectedEvent.theme : 'indie_pop'"
 									@change="updateEventTheme(($event.target as HTMLSelectElement).value || 'indie_pop')">
 								<option
-									v-for="opt in themeOptions"
+									v-for="opt in musicOptions"
 									:key="opt.value"
 									:value="opt.value">
 									{{ opt.label }}

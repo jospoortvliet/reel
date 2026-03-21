@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\Reel\Controller;
 
 use OCA\Reel\AppInfo\Application;
+use OCA\Reel\Service\MusicService;
 use OCP\AppFramework\Http\Attribute\ApiRoute;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\DataResponse;
@@ -23,6 +24,7 @@ class SettingsController extends OCSController {
         string          $appName,
         IRequest        $request,
         private IConfig $config,
+        private MusicService $musicService,
         private ?string $userId,
     ) {
         parent::__construct($appName, $request);
@@ -39,6 +41,7 @@ class SettingsController extends OCSController {
     #[ApiRoute(verb: 'GET', url: '/api/v1/settings')]
     public function getSettings(): DataResponse {
         if ($guard = $this->requireUserId()) return $guard;
+
         return new DataResponse([
             'similarity_threshold' => (int)$this->config->getUserValue(
                 $this->userId,
@@ -58,6 +61,7 @@ class SettingsController extends OCSController {
                 'output_orientation',
                 self::DEFAULT_OUTPUT_ORIENTATION,
             ),
+            'custom_music_folder' => $this->musicService->getCustomMusicFolderPath($this->userId),
         ]);
     }
 
@@ -67,8 +71,10 @@ class SettingsController extends OCSController {
         ?int    $similarity_threshold = null,
         ?int    $burst_gap_seconds    = null,
         ?string $output_orientation   = null,
+        ?string $custom_music_folder  = null,
     ): DataResponse {
         if ($guard = $this->requireUserId()) return $guard;
+
         if ($similarity_threshold !== null) {
             $similarity_threshold = max(1, min(30, $similarity_threshold));
             $this->config->setUserValue(
@@ -98,6 +104,14 @@ class SettingsController extends OCSController {
                     'output_orientation',
                     $output_orientation,
                 );
+            }
+        }
+
+        if ($custom_music_folder !== null) {
+            try {
+                $this->musicService->setCustomMusicFolderPath($this->userId, $custom_music_folder);
+            } catch (\Throwable $e) {
+                return new DataResponse(['error' => 'Invalid custom music folder'], 400);
             }
         }
 

@@ -8,6 +8,39 @@
 
 		<template v-else>
 			<section :class="$style.section">
+				<h3>{{ t('reel', 'Music') }}</h3>
+				<p :class="$style.description">
+					{{ t('reel', 'Optional: set a folder in your files that contains your own soundtrack files. Reel scans this folder recursively and adds supported audio files (mp3, wav, aac, flac, ogg, m4a, opus) to the song picker.') }}
+				</p>
+				<div :class="$style.field">
+					<label for="custom-music-folder">{{ t('reel', 'Custom music folder') }}</label>
+					<div :class="$style.folderPickerRow">
+						<input
+							id="custom-music-folder"
+							v-model.trim="form.customMusicFolder"
+							type="text"
+							:class="$style.textInput"
+							readonly
+							:placeholder="t('reel', 'No folder selected')" />
+						<NcButton
+							type="button"
+							@click="pickCustomMusicFolder">
+							{{ t('reel', 'Choose folder') }}
+						</NcButton>
+						<NcButton
+							type="button"
+							:disabled="!form.customMusicFolder"
+							@click="form.customMusicFolder = ''">
+							{{ t('reel', 'Clear') }}
+						</NcButton>
+					</div>
+					<p :class="$style.hint">
+						{{ t('reel', 'Pick a folder from Files. Reel scans it recursively for music files.') }}
+					</p>
+				</div>
+			</section>
+
+			<section :class="$style.section">
 				<h3>{{ t('reel', 'Video Output') }}</h3>
 				<p :class="$style.description">
 					{{ t('reel', 'Choose the orientation of the generated highlight video. This also determines whether live photo clips are used by default - clips matching the output orientation are preferred.') }}
@@ -103,7 +136,7 @@
 import { ref, onMounted } from 'vue'
 import axios from '@nextcloud/axios'
 import { generateOcsUrl } from '@nextcloud/router'
-import { showError } from '@nextcloud/dialogs'
+import { getFilePickerBuilder, showError } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import NcButton from '@nextcloud/vue/components/NcButton'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
@@ -122,6 +155,7 @@ const form = ref({
 	burstGap:    5,
 	similarity:  16,
 	orientation: 'landscape_16_9' as string,
+	customMusicFolder: '',
 })
 
 onMounted(async () => {
@@ -132,12 +166,34 @@ onMounted(async () => {
 		form.value.burstGap    = data.burst_gap_seconds
 		form.value.similarity  = data.similarity_threshold
 		form.value.orientation = data.output_orientation ?? 'landscape_16_9'
+		form.value.customMusicFolder = data.custom_music_folder ?? ''
 	} catch (e) {
 		showError(t('reel', 'Failed to load settings'))
 	} finally {
 		loading.value = false
 	}
 })
+
+async function pickCustomMusicFolder() {
+	try {
+		const startPath = form.value.customMusicFolder || '/'
+		const picker = getFilePickerBuilder(t('reel', 'Choose custom music folder'))
+			.allowDirectories(true)
+			.startAt(startPath)
+			.build()
+
+		const selected = await picker.pick()
+		if (selected) {
+			form.value.customMusicFolder = selected
+		}
+	} catch (error: any) {
+		const msg = String(error?.message ?? '')
+		if (msg.toLowerCase().includes('cancel')) {
+			return
+		}
+		showError(t('reel', 'Failed to choose folder'))
+	}
+}
 
 async function save() {
 	saving.value = true
@@ -148,6 +204,7 @@ async function save() {
 			burst_gap_seconds:    form.value.burstGap,
 			similarity_threshold: form.value.similarity,
 			output_orientation:   form.value.orientation,
+			custom_music_folder:  form.value.customMusicFolder,
 		}, { params: { format: 'json' } })
 		saved.value = true
 		setTimeout(() => { saved.value = false }, 3000)
@@ -197,6 +254,23 @@ async function save() {
 	display: flex;
 	align-items: center;
 	gap: 12px;
+}
+
+.folderPickerRow {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.textInput {
+	width: 100%;
+	max-width: 320px;
+	padding: 8px 10px;
+	border: 1px solid var(--color-border-dark);
+	border-radius: var(--border-radius-element);
+	background: var(--color-main-background);
+	color: var(--color-main-text);
 }
 
 .inputRow input[type="range"] {

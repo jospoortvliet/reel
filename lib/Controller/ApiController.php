@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\Reel\Controller;
 
 use OCA\Reel\Service\EventDetectionService;
+use OCA\Reel\Service\MusicService;
 use OCA\Reel\Service\RenderJobService;
 use OCP\AppFramework\Http\Attribute\ApiRoute;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
@@ -23,6 +24,7 @@ class ApiController extends OCSController {
         private IDBConnection         $db,
         private EventDetectionService $detectionService,
         private RenderJobService      $jobService,
+        private MusicService          $musicService,
         private ?string               $userId,
         private IRootFolder           $rootFolder,
     ) {
@@ -139,9 +141,18 @@ class ApiController extends OCSController {
         }
         if ($theme !== null) {
             $allowedThemes = ['acoustic_folk', 'indie_pop', 'cinematic_orchestral'];
-            if (!in_array($theme, $allowedThemes, true)) {
+            $isCustomTrack = str_starts_with($theme, 'custom:');
+            if (!$isCustomTrack && !in_array($theme, $allowedThemes, true)) {
                 $theme = 'indie_pop';
             }
+
+            if ($isCustomTrack) {
+                $customPath = substr($theme, strlen('custom:')) ?: '';
+                if ($this->musicService->resolveCustomMusicFilePath($this->userId, $customPath) === null) {
+                    return new DataResponse(['error' => 'Invalid custom track selection'], 400);
+                }
+            }
+
             $qb->set('theme', $qb->createNamedParameter($theme));
         }
 
@@ -233,6 +244,13 @@ class ApiController extends OCSController {
         $job = $this->jobService->enqueue($id, $this->userId);
 
         return new DataResponse(['job' => $this->formatJob($job)]);
+    }
+
+    #[NoAdminRequired]
+    #[ApiRoute(verb: 'GET', url: '/api/v1/music/options')]
+    public function listMusicOptions(): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
+        return new DataResponse($this->musicService->getMusicOptions($this->userId));
     }
 
     #[NoAdminRequired]

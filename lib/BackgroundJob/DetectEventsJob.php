@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\Reel\BackgroundJob;
 
 use OCA\Reel\Service\EventDetectionService;
+use OCA\Reel\Service\MusicService;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\TimedJob;
 use OCP\IUserManager;
@@ -23,6 +24,7 @@ class DetectEventsJob extends TimedJob {
         ITimeFactory                  $time,
         private EventDetectionService $detectionService,
         private IUserManager          $userManager,
+        private MusicService          $musicService,
         private LoggerInterface       $logger,
     ) {
         parent::__construct($time);
@@ -41,15 +43,27 @@ class DetectEventsJob extends TimedJob {
         $this->logger->info('Reel: DetectEventsJob starting');
 
         $this->userManager->callForAllUsers(function (\OCP\IUser $user) {
+            $uid = $user->getUID();
             try {
-                $count = $this->detectionService->detectForUser($user->getUID());
+                $count = $this->detectionService->detectForUser($uid);
                 $this->logger->info('Reel: detected {count} events for user {user}', [
                     'count' => $count,
-                    'user'  => $user->getUID(),
+                    'user'  => $uid,
                 ]);
             } catch (\Throwable $e) {
                 $this->logger->error('Reel: event detection failed for user {user}: {msg}', [
-                    'user' => $user->getUID(),
+                    'user' => $uid,
+                    'msg'  => $e->getMessage(),
+                ]);
+            }
+
+            // Refresh the custom music file cache so the UI reflects any
+            // additions/removals in the user's chosen music folder.
+            try {
+                $this->musicService->refreshCache($uid);
+            } catch (\Throwable $e) {
+                $this->logger->warning('Reel: music cache refresh failed for user {user}: {msg}', [
+                    'user' => $uid,
                     'msg'  => $e->getMessage(),
                 ]);
             }

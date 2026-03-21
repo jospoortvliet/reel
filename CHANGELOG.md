@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Video opening: title and date overlay displayed for 2.5 s at the start of each reel, positioned in the bottom third of the frame (works for both landscape and portrait).
 - Video closing: 3-second fade-to-black outro applied to all reels; last still image is extended to a minimum of 4 s so the fade has room; timeline is freeze-frame extended when needed, with at least 1 s of unobstructed viewing before the fade begins.
+- Music: new user setting for a custom music folder; Reel scans it recursively for supported audio files and exposes those tracks in the soundtrack picker.
 
 ### Fixed
 

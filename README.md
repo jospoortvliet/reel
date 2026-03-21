@@ -284,18 +284,21 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] **App Store prep** — metadata, screenshots, signing, release workflow
 - [x] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
 - [x] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
-- [ ] adress some rendering bugs
-- [x] improve the video opening and closing
-- [ ] switch short live clips to image
-- [x] refactor default settings into the initial detection run
-- [ ] double check we follow the logic of the animations consistently
-- [ ] choose audio automatically (at random...)
-- [ ] improve naming of events using tags where possible
-- [ ] create a number of 'special' events
+- [x] Adress some rendering bugs
+- [x] Improve the video opening and closing
+- [x] Switch short live clips to image
+- [x] Refactor default settings into the initial detection run
+- [x] Support user-provided music folder
+- [ ] choose music automatically (at random...)
+- [ ] double check we follow the logic of the animations consistently and improve animation choices
+- [ ] find a way to use the triptych effect occasionally
+- [ ] add perhaps one-two more effects
 - [ ] change the live photo icon to one more... like a live photo icon!
 - [ ] put limits on the nr of items to limit length (and size) of videos
 - [ ] auto-create videos (with some limits!)
+- [ ] improve naming of events using tags where possible
 - [ ] create/detect special types of events - like 'pets in 2025' or an entire vacation in a separate country, or a city trip.
+- [ ] support for Android live photos - Google/Samsung embed them in jpeg files, Memories can deetect them.
 - [ ] **Masonry/aspect-ratio thumbnails** — needs custom thumbnail generation since Nextcloud's preview API crops to square
 - [ ] **Ultra-smooth motion pipeline** — animate on an upscaled working canvas first, then downscale to output at the end (best-quality approach to reduce subpixel jitter)
 
