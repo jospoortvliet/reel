@@ -269,10 +269,12 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] **App Store prep** — metadata, screenshots, signing, release workflow
 - [x] **Custom Dockerfile** — apt installs (FFmpeg, Imagick) don't survive container restart currently
 - [x] **PHPUnit tests** — EventDetectionService, DuplicateFilterService, VideoRenderingService, ApiController
-- [x] adress some rendering bugs
-- [ ] improve the video opening and closing
+- [ ] adress some rendering bugs
+- [x] improve the video opening and closing
 - [ ] switch short live clips to image
 - [ ] double check we follow the logic of the animations consistently
+- [ ] improve naming of events using tags where possible
+- [ ] create a number of 'special' events
 - [ ] change the live photo icon to one more... like a live photo icon!
 - [ ] put limits on the nr of items to limit length (and size) of videos
 - [ ] auto-create videos (with some limits!)

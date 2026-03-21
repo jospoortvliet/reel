@@ -50,6 +50,8 @@ class VideoRenderingService {
     private const MUSIC_DUCKED_VOLUME = 1.00;
     private const MUSIC_FADE_OUT_SECONDS = 2.4;
     private const AUDIO_CROSSFADE_SECONDS = 0.10;
+    private const INTRO_TEXT_DURATION_SECONDS = 2.5;
+    private const OUTRO_VIDEO_FADE_SECONDS = 3.0;
 
     private int $outputWidth = self::WIDTH;
     private int $outputHeight = self::HEIGHT;
@@ -102,6 +104,7 @@ class VideoRenderingService {
             $this->concatenateIntermediates(
                 $clips,
                 $localOutputPath,
+                $event,
                 $event['theme'] ?? null,
                 $onDebug,
             );
@@ -144,6 +147,14 @@ class VideoRenderingService {
 
         for ($index = 0; $index < $total; $index++) {
             $item = $items[$index];
+            $isLastItem = ($index === ($total - 1));
+            $clipDuration = (float)($item['duration'] ?? 0.0);
+
+            // Keep default stills at 2.5s, but give the final still extra hold time
+            // so the end fade can run after ~1s unobstructed viewing.
+            if (!$item['is_video'] && $isLastItem) {
+                $clipDuration = max($clipDuration, 4.0);
+            }
 
             if ($this->canBuildTriptychSegment($items, $index)) {
                 $a = $items[$index];
@@ -210,8 +221,8 @@ class VideoRenderingService {
             }
 
             $cmd = $item['is_video']
-                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $item['duration'], (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), 'apple_subtle')
-                : $this->buildPhotoNormalizeCmd($inputPath, $outPath, $item['duration'], $item['motion']);
+                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $clipDuration, (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), 'apple_subtle')
+                : $this->buildPhotoNormalizeCmd($inputPath, $outPath, $clipDuration, $item['motion']);
 
             $this->logger->debug('Reel: normalizing item {i}/{total}', [
                 'i'     => $index + 1,
@@ -222,7 +233,7 @@ class VideoRenderingService {
             $this->runFfmpeg($cmd);
             $clips[] = [
                 'path' => $outPath,
-                'duration' => (float)$item['duration'],
+                'duration' => $clipDuration,
                 'kind' => $item['is_video'] ? 'video' : 'photo',
                 'is_breaker' => (bool)$item['is_video'],
                 'motion' => (string)($item['motion']['run_motion'] ?? 'none'),
@@ -567,7 +578,7 @@ class VideoRenderingService {
     // Pass 2: Concatenate intermediates into final output
     // -------------------------------------------------------------------------
 
-    private function concatenateIntermediates(array $clips, string $outputPath, ?string $theme, ?callable $onDebug = null): void {
+    private function concatenateIntermediates(array $clips, string $outputPath, array $event, ?string $theme, ?callable $onDebug = null): void {
         $count = count($clips);
 
         if ($count === 0) {
@@ -575,7 +586,7 @@ class VideoRenderingService {
         }
 
         if ($count > 1) {
-            $this->concatenateWithTransitions($clips, $outputPath, $theme, $onDebug);
+            $this->concatenateWithTransitions($clips, $outputPath, $event, $theme, $onDebug);
             return;
         }
 
@@ -643,7 +654,7 @@ class VideoRenderingService {
         $this->runFfmpeg($cmd);
     }
 
-    private function concatenateWithTransitions(array $clips, string $outputPath, ?string $theme, ?callable $onDebug = null): void {
+    private function concatenateWithTransitions(array $clips, string $outputPath, array $event, ?string $theme, ?callable $onDebug = null): void {
         $count = count($clips);
         $musicPath = $this->getMusicPath($theme);
         $hasMusic = $musicPath && file_exists($musicPath);
@@ -716,6 +727,57 @@ class VideoRenderingService {
             $videoLabel = $newVideoLabel;
         }
 
+        $introTitle = trim((string)($event['title'] ?? ''));
+        $introDate = '';
+        if (!empty($event['date_start'])) {
+            $dt = (new \DateTimeImmutable('@' . (int)$event['date_start']))->setTimezone(new \DateTimeZone(date_default_timezone_get()));
+            $introDate = $dt->format('F j, Y');
+        }
+
+        if ($introTitle !== '') {
+            $titleEsc = $this->escapeDrawtext($introTitle);
+            $enableExpr = "lte(t," . number_format(self::INTRO_TEXT_DURATION_SECONDS, 3, '.', '') . ")";
+            $titleLabel = 'vtitle';
+            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$titleEsc}':fontcolor=white:fontsize=64:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6-text_h-8):enable='{$enableExpr}'[{$titleLabel}]";
+            $videoLabel = $titleLabel;
+        }
+
+        if ($introDate !== '') {
+            $dateEsc = $this->escapeDrawtext($introDate);
+            $enableExpr = "lte(t," . number_format(self::INTRO_TEXT_DURATION_SECONDS, 3, '.', '') . ")";
+            $dateLabel = 'vdate';
+            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$dateEsc}':fontcolor=white:fontsize=40:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6+8):enable='{$enableExpr}'[{$dateLabel}]";
+            $videoLabel = $dateLabel;
+        }
+
+        // End fade logic:
+        // - fade lasts 3s
+        // - keep at least 1s unobstructed final clip before fade starts
+        // - if needed, freeze-frame extend the tail so fade has room
+        $lastClipDuration = (float)($clips[$count - 1]['duration'] ?? 0.0);
+        $incomingTransition = $count > 1 ? (float)$transitionDurations[$count - 2] : 0.0;
+        $unobstructedStart = max(0.0, $accumulated - $lastClipDuration + $incomingTransition);
+        $minimumFadeStart = $unobstructedStart + 1.0;
+
+        $outroFadeDuration = self::OUTRO_VIDEO_FADE_SECONDS;
+        $baseFadeStart = max(0.0, $accumulated - $outroFadeDuration);
+        $fadeStart = max($baseFadeStart, $minimumFadeStart);
+        $tailHold = max(0.0, ($fadeStart + $outroFadeDuration) - $accumulated);
+
+        if ($tailHold > 0.0) {
+            $tailHoldStr = number_format($tailHold, 3, '.', '');
+            $holdLabel = 'vhold';
+            $filterParts[] = "[{$videoLabel}]tpad=stop_mode=clone:stop_duration={$tailHoldStr}[{$holdLabel}]";
+            $videoLabel = $holdLabel;
+        }
+
+        $fadeLabel = 'voutro';
+        $filterParts[] = "[{$videoLabel}]fade=t=out:st=" . number_format($fadeStart, 3, '.', '')
+            . ":d=" . number_format($outroFadeDuration, 3, '.', '')
+            . "[{$fadeLabel}]";
+        $videoLabel = $fadeLabel;
+        $timelineDuration = max($accumulated, $fadeStart + $outroFadeDuration);
+
         $audioInputs = [];
         $audioDurations = [];
         for ($i = 0; $i < $count; $i++) {
@@ -744,10 +806,10 @@ class VideoRenderingService {
 
         if ($hasMusic) {
             $musicInputIndex = $count;
-            $fadeDuration = min(self::MUSIC_FADE_OUT_SECONDS, max(0.0, $accumulated));
-            $fadeStart = max(0.0, $accumulated - $fadeDuration);
+            $fadeDuration = min(self::OUTRO_VIDEO_FADE_SECONDS, max(0.0, $timelineDuration));
+            $fadeStart = max(0.0, $timelineDuration - $fadeDuration);
             $filterParts[] = "[{$musicInputIndex}:a]aresample=async=1:first_pts=0,atrim=duration="
-                . number_format($accumulated, 3, '.', '')
+                . number_format($timelineDuration, 3, '.', '')
                 . ",volume=" . self::MUSIC_BASE_VOLUME
                 . ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '')
                 . ":d=" . number_format($fadeDuration, 3, '.', '')
@@ -777,6 +839,13 @@ class VideoRenderingService {
             $onDebug("FFmpeg concat cmd: " . implode(' ', array_map('escapeshellarg', $cmd)));
         }
         $this->runFfmpeg($cmd);
+    }
+
+    private function escapeDrawtext(string $text): string {
+        $escaped = str_replace('\\', '\\\\', $text);
+        $escaped = str_replace(':', '\\:', $escaped);
+        $escaped = str_replace("'", "\\'", $escaped);
+        return str_replace('%', '\\%', $escaped);
     }
 
     private function pickTransitionSpec(array $prevClip, array $nextClip, int $index): array {
