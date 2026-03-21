@@ -84,7 +84,8 @@
 
 			<div :class="$style.actions">
 				<NcButton
-					type="primary"
+					type="button"
+					variant="primary"
 					:disabled="saving"
 					@click="save">
 					<template #icon>

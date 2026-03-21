@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Startup/runtime: removed invalid `registerCommand()` calls from app bootstrap registration; commands continue to be declared via `appinfo/info.xml`.
+- DX: resolved current Intelephense diagnostics by aligning `NcButton` prop usage in settings UI and by adding lightweight local type stubs for optional Imagick symbols used by analyzer tooling.
+- Tests/bootstrap: switched optional Doctrine/OC symbol guards to string-based checks to avoid unresolved-type static-analysis noise.
+
 ## [1.1.8] - 2026-03-21
 
 ### Changed

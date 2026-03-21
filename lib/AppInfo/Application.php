@@ -5,9 +5,6 @@ declare(strict_types=1);
 namespace OCA\Reel\AppInfo;
 
 use OCA\Reel\BackgroundJob\DetectEventsJob;
-use OCA\Reel\Command\DetectEvents;
-use OCA\Reel\Command\DebugDuplicates;
-use OCA\Reel\Command\RenderEvent;
 use OCP\AppFramework\App;
 use OCP\AppFramework\Bootstrap\IBootContext;
 use OCP\AppFramework\Bootstrap\IBootstrap;
@@ -24,9 +21,8 @@ class Application extends App implements IBootstrap {
     }
 
     public function register(IRegistrationContext $context): void {
-        $context->registerCommand(DetectEvents::class);
-        $context->registerCommand(RenderEvent::class);
-        $context->registerCommand(DebugDuplicates::class);
+        // Commands are declared in appinfo/info.xml <commands>.
+        // IRegistrationContext does not provide registerCommand().
     }
 
     public function boot(IBootContext $context): void {
