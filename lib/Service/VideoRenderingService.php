@@ -1088,6 +1088,24 @@ class VideoRenderingService {
                     $movFileId = $this->memoriesRepository->findLiveVideoFileId($fileId);
                     if ($movFileId !== null) {
                         $fileId = $movFileId;
+                        
+                        // Probe the live clip duration; very short clips (<1s) are effectively
+                        // invisible once transitions are applied, so fall back to the still.
+                        $movFiles = $userFolder->getById($movFileId);
+                        if (!empty($movFiles)) {
+                            $movLocalPath = $this->getLocalPath($movFiles[0]);
+                            if (file_exists($movLocalPath)) {
+                                $liveDuration = $this->probeVideoDurationSeconds($movLocalPath);
+                                if ($liveDuration !== null && $liveDuration < 1.0) {
+                                    $this->logger->info(
+                                        'Reel: excluding short live clip {d}s < 1.0s for file {id}, using still',
+                                        ['id' => $row['file_id'], 'd' => round($liveDuration, 2)]
+                                    );
+                                    $fileId = (int)$row['file_id'];
+                                    $useLive = false;
+                                }
+                            }
+                        }
                     } else {
                         $this->logger->info('Reel: .mov not found for live photo {id}, using still', ['id' => $row['file_id']]);
                         $useLive = false;
@@ -1360,6 +1378,10 @@ class VideoRenderingService {
         return $duration > 0.0 ? $duration : null;
     }
 
+    /**
+     * Probe a live MOV clip's duration by file ID.
+     * Used during detection to exclude very short clips that would be invisible in the timeline.
+     */
     private function buildPhotoMotionSubtle(
         int $fileId,
         array $faces,

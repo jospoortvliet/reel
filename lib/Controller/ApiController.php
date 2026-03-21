@@ -17,6 +17,7 @@ use OCP\IConfig;
 use OCP\IDBConnection;
 use OCP\IRequest;
 use OCP\Files\IRootFolder;
+use Psr\Log\LoggerInterface;
 
 class ApiController extends OCSController {
 
@@ -30,6 +31,7 @@ class ApiController extends OCSController {
         private IRootFolder           $rootFolder,
         private IConfig               $config,
         private MemoriesRepository    $memoriesRepository,
+        private LoggerInterface       $logger,
     ) {
         parent::__construct($appName, $request);
     }
@@ -308,12 +310,23 @@ class ApiController extends OCSController {
             $row['isvideo'] = (bool)($row['isvideo'] ?? false);
             $row['liveid']  = $row['liveid'] ?? null;
 
-            // Only include liveid if a corresponding live video file actually exists
+            // Only include liveid if a corresponding live video file actually exists AND is long enough
             if ($row['liveid']) {
                 $liveVideoFileId = $this->memoriesRepository->findLiveVideoFileId((int)$row['file_id']);
                 if ($liveVideoFileId === null) {
                     // No live video file found; clear liveid so UI won't show toggle
                     $row['liveid'] = null;
+                } else {
+                    // Check if the live clip is at least 1 second; very short clips are invisible
+                    // in the timeline once transitions are applied, so treat them as stills
+                    $duration = $this->getLiveClipDuration($liveVideoFileId);
+                    if ($duration !== null && $duration < 1.0) {
+                        $this->logger->info(
+                            'Reel: excluding short live clip {d}s < 1.0s for file {id}',
+                            ['id' => $row['file_id'], 'd' => round($duration, 2)]
+                        );
+                        $row['liveid'] = null;
+                    }
                 }
             }
 
@@ -401,6 +414,35 @@ class ApiController extends OCSController {
             }
             return $userFolder->getRelativePath($nodes[0]->getPath());
         } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function getLiveClipDuration(int $fileId): ?float {
+        try {
+            $userFolder = $this->rootFolder->getUserFolder($this->userId);
+            $nodes = $userFolder->getById($fileId);
+            if (empty($nodes)) {
+                return null;
+            }
+
+            $file = $nodes[0];
+            $path = $file->getPath();
+
+            if (!file_exists($path)) {
+                return null;
+            }
+
+            // Use ffprobe to get the actual video duration
+            $cmd = sprintf(
+                'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1:noprint_wrappers=1 %s 2>/dev/null',
+                escapeshellarg($path)
+            );
+            $output = trim((string)shell_exec($cmd));
+
+            return !empty($output) ? (float)$output : null;
+        } catch (\Throwable $e) {
+            $this->logger->debug('Reel: error probing live clip {id}: {msg}', ['id' => $fileId, 'msg' => $e->getMessage()]);
             return null;
         }
     }
