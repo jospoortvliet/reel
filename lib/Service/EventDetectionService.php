@@ -130,6 +130,7 @@ class EventDetectionService {
     public function __construct(
         private IDBConnection        $db,
         private LoggerInterface      $logger,
+        private UtilityFilterService $utilityFilter,
         private DuplicateFilterService $duplicateFilter,
         private DistinctFilterService $distinctFilter,
         private MemoriesRepository   $memoriesRepository,
@@ -1583,6 +1584,14 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         } catch (\Throwable $e) {
             $this->db->rollBack();
             throw $e;
+        }
+
+        $utilityExcluded = $this->utilityFilter->filterEvent($eventId, $userId, $this->debugCallback);
+        if ($utilityExcluded > 0) {
+            $this->logger->debug('Reel: excluded {n} utility media from new event {id}', [
+                'n' => $utilityExcluded,
+                'id' => $eventId,
+            ]);
         }
 
         // Duplicate suppression is useful for all event kinds.

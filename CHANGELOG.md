@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Video opening: title and date overlay displayed for 2.5 s at the start of each reel, positioned in the bottom third of the frame (works for both landscape and portrait).
 - Video closing: 3-second fade-to-black outro applied to all reels; last still image is extended to a minimum of 4 s so the fade has room; timeline is freeze-frame extended when needed, with at least 1 s of unobstructed viewing before the fade begins.
 - Music: new user setting for a custom music folder; Reel scans it recursively for supported audio files and exposes those tracks in the soundtrack picker.
+- Event detection: new Tier A utility-photo prefilter (`UtilityFilterService`) to conservatively exclude likely receipts/menus/screens/doc photos before downstream media selection.
+
+### Changed
+
+- Event media selection pipeline now runs in this order per new event: utility prefilter → duplicate burst filter → distinctness filter.
+- Utility prefilter includes conservative guardrails: never auto-exclude videos, face-rich shots, first/last event media, or first media after a large time gap.
+
+### Debugging
+
+- `occ reel:detect-events --debug` now includes utility prefilter diagnostics (`utility event=...`, `utility drop file_id=...`) so filtering decisions are inspectable from CLI output.
 
 ### Fixed
 
