@@ -76,6 +76,51 @@ class EventDetectionService {
         'Food' => 8, 'Dining' => 8,
     ];
 
+    private const EVENT_KIND_TIMELINE = 'timeline';
+    private const EVENT_KIND_PETS = 'pets_year';
+    private const EVENT_KIND_PERSON = 'person_year';
+    private const EVENT_KIND_TRIP_SHORT = 'trip_short';
+    private const EVENT_KIND_TRIP_LONG = 'trip_long';
+    private const EVENT_KIND_YEAR_REVIEW = 'year_review';
+    private const EVENT_KIND_SEASON = 'season';
+    private const EVENT_KIND_TRADITION = 'tradition';
+
+    private const PET_YEAR_MIN_ITEMS = 10;
+    private const PERSON_YEAR_MIN_ITEMS = 10;
+    private const TRIP_MIN_ITEMS = 8;
+    private const YEAR_REVIEW_MIN_ITEMS = 30;
+    private const SEASON_MIN_ITEMS = 15;
+    private const TRADITION_MIN_ITEMS = 10;
+    private const TRIP_SHORT_MAX_SECONDS = 4 * 24 * 3600;
+    private const TRIP_LONG_MAX_SECONDS = 28 * 24 * 3600;
+    private const TRIP_SEGMENT_GAP_SECONDS = 3 * 24 * 3600;
+
+    private const LARGE_COUNTRIES = [
+        'United States', 'USA', 'United States of America',
+        'Brazil', 'Brasil',
+        'Russia', 'Russian Federation',
+        'India',
+        'China', "People's Republic of China",
+    ];
+
+    private const PET_TAG_TITLES = [
+        'Dog' => 'Dogs',
+        'Cat' => 'Cats',
+        'Bird' => 'Birds',
+        'Horse' => 'Horses',
+        'Rabbit' => 'Rabbits',
+        'Fish' => 'Fish',
+        'Animal' => 'Pets',
+        'Pet' => 'Pets',
+    ];
+
+    private const SEASON_NAMES = [
+        1 => 'Winter', 2 => 'Winter', 3 => 'Spring',
+        4 => 'Spring', 5 => 'Spring', 6 => 'Summer',
+        7 => 'Summer', 8 => 'Summer', 9 => 'Autumn',
+        10 => 'Autumn', 11 => 'Autumn', 12 => 'Winter',
+    ];
+
     /** @var (callable(string):void)|null */
     private $debugCallback = null;
 
@@ -112,16 +157,38 @@ class EventDetectionService {
             'user'  => $userId,
         ]);
 
-        // 1b. Enrich each media item with its systemtags (for title enrichment)
+        // 1b. Enrich each media item with tags, people, and place hierarchy.
         $fileIds = array_map(static fn(array $i): int => (int)$i['fileid'], $media);
         $tagMap  = $this->memoriesRepository->loadTagsForFiles($fileIds);
+        $placeHierarchyMap = $this->memoriesRepository->loadPlaceHierarchyForFiles($fileIds);
+        $personMap = $this->memoriesRepository->loadFaceClustersForFiles($fileIds, $userId);
         foreach ($media as &$item) {
             $item['tags'] = $tagMap[(int)$item['fileid']] ?? [];
+            $placeHierarchy = $placeHierarchyMap[(int)$item['fileid']] ?? [
+                'country' => null,
+                'region' => null,
+                'city' => null,
+                'timezone' => null,
+            ];
+            $item['place_hierarchy'] = $placeHierarchy;
+            $item['country_name'] = $placeHierarchy['country'];
+            $item['region_name'] = $placeHierarchy['region'];
+            $item['city_name'] = $placeHierarchy['city'];
+            $item['person_clusters'] = $personMap[(int)$item['fileid']] ?? [];
         }
         unset($item);
 
-        // 2. Cluster into events
-        $clusters = $this->clusterIntoEvents($media);
+        // 2. Build the normal timeline events plus derived yearly/special events.
+        $timelineClusters = $this->clusterIntoEvents($media);
+        $clusters = array_merge(
+            $timelineClusters,
+            $this->detectPetYearEvents($media),
+            $this->detectPersonYearEvents($media),
+            $this->detectTripEvents($media),
+            $this->detectYearReviewEvents($media),
+            $this->detectSeasonalEvents($media),
+            $this->detectTraditionEvents($timelineClusters),
+        );
 
         $this->logger->info('Reel: detected {count} events for user {user}', [
             'count' => count($clusters),
@@ -517,6 +584,8 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
         $cluster['location'] = $location;
         $cluster['title']    = $this->buildTitle($cluster['date_start'], $location, $tag);
+        $cluster['event_kind'] = self::EVENT_KIND_TIMELINE;
+        $cluster['event_key'] = null;
 
         unset($cluster['place_counts'], $cluster['tag_counts']); // no longer needed
         return $cluster;
@@ -604,6 +673,433 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         return false;
     }
 
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectPetYearEvents(array $media): array {
+        $byYear = [];
+        foreach ($media as $item) {
+            $year = (int)date('Y', (int)$item['epoch']);
+            $petTags = [];
+            foreach ($item['tags'] ?? [] as $tag) {
+                if (isset(self::PET_TAG_TITLES[$tag])) {
+                    $petTags[$tag] = true;
+                }
+            }
+            if (empty($petTags)) {
+                continue;
+            }
+
+            $fileId = (int)$item['fileid'];
+            $byYear[$year]['media'][$fileId] = $item;
+            foreach (array_keys($petTags) as $tag) {
+                $byYear[$year]['tag_counts'][$tag] = ($byYear[$year]['tag_counts'][$tag] ?? 0) + 1;
+            }
+        }
+
+        $events = [];
+        foreach ($byYear as $year => $group) {
+            $items = array_values($group['media'] ?? []);
+            if (count($items) < self::PET_YEAR_MIN_ITEMS) {
+                continue;
+            }
+
+            $tag = $this->selectMostSpecificTag($group['tag_counts'] ?? []);
+            $specificCount = (int)(($group['tag_counts'] ?? [])[$tag] ?? 0);
+            $label = $specificCount >= (int)ceil(count($items) * 0.60)
+                ? (self::PET_TAG_TITLES[$tag] ?? 'Pets')
+                : 'Pets';
+            $title = $label . ' · ' . $year;
+            $events[] = $this->createDerivedEvent(
+                self::EVENT_KIND_PETS,
+                'pets:' . $year,
+                $title,
+                null,
+                $items,
+            );
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectPersonYearEvents(array $media): array {
+        $groups = [];
+        foreach ($media as $item) {
+            $year = (int)date('Y', (int)$item['epoch']);
+            $fileId = (int)$item['fileid'];
+            foreach ($item['person_clusters'] ?? [] as $person) {
+                $clusterId = (int)($person['cluster_id'] ?? 0);
+                if ($clusterId <= 0) {
+                    continue;
+                }
+
+                $groups[$year][$clusterId]['media'][$fileId] = $item;
+                $groups[$year][$clusterId]['title'] = trim((string)($person['title'] ?? ''));
+            }
+        }
+
+        $events = [];
+        foreach ($groups as $year => $clusters) {
+            foreach ($clusters as $clusterId => $group) {
+                $items = array_values($group['media'] ?? []);
+                if (count($items) < self::PERSON_YEAR_MIN_ITEMS) {
+                    continue;
+                }
+
+                $label = trim((string)($group['title'] ?? ''));
+                if ($label === '') {
+                    $label = 'Person ' . $clusterId;
+                }
+
+                $events[] = $this->createDerivedEvent(
+                    self::EVENT_KIND_PERSON,
+                    'person:' . $clusterId . ':' . $year,
+                    $label . ' · ' . $year,
+                    null,
+                    $items,
+                );
+            }
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectYearReviewEvents(array $media): array {
+        $groups = [];
+        foreach ($media as $item) {
+            $year = (int)date('Y', (int)$item['epoch']);
+            $groups[$year][] = $item;
+        }
+
+        $events = [];
+        foreach ($groups as $year => $items) {
+            if (count($items) < self::YEAR_REVIEW_MIN_ITEMS) {
+                continue;
+            }
+
+            $events[] = $this->createDerivedEvent(
+                self::EVENT_KIND_YEAR_REVIEW,
+                'year-review:' . $year,
+                'Best of ' . $year,
+                null,
+                $items,
+            );
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectSeasonalEvents(array $media): array {
+        $groups = [];
+        foreach ($media as $item) {
+            $month = (int)date('n', (int)$item['epoch']);
+            $year = (int)date('Y', (int)$item['epoch']);
+            $season = self::SEASON_NAMES[$month] ?? null;
+            if ($season === null) {
+                continue;
+            }
+            $groups[$year][$season][] = $item;
+        }
+
+        $events = [];
+        foreach ($groups as $year => $seasons) {
+            foreach ($seasons as $season => $items) {
+                if (count($items) < self::SEASON_MIN_ITEMS) {
+                    continue;
+                }
+
+                $events[] = $this->createDerivedEvent(
+                    self::EVENT_KIND_SEASON,
+                    'season:' . $year . ':' . $this->slugify($season),
+                    $season . ' ' . $year,
+                    null,
+                    $items,
+                );
+            }
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectTripEvents(array $media): array {
+        $byYear = [];
+        foreach ($media as $item) {
+            $year = (int)date('Y', (int)$item['epoch']);
+            $byYear[$year][] = $item;
+        }
+
+        $events = [];
+        foreach ($byYear as $year => $items) {
+            usort($items, static fn(array $a, array $b): int => (int)$a['epoch'] <=> (int)$b['epoch']);
+            $homeArea = $this->detectHomeArea($items);
+            if ($homeArea === null) {
+                continue;
+            }
+
+            $current = [];
+            $currentArea = null;
+            $lastEpoch = null;
+
+            $flush = function () use (&$events, &$current, &$currentArea, $year): void {
+                if (empty($current) || $currentArea === null) {
+                    $current = [];
+                    $currentArea = null;
+                    return;
+                }
+
+                $duration = (int)end($current)['epoch'] - (int)reset($current)['epoch'];
+                $count = count($current);
+                if ($count < self::TRIP_MIN_ITEMS || $duration > self::TRIP_LONG_MAX_SECONDS) {
+                    $current = [];
+                    $currentArea = null;
+                    return;
+                }
+
+                $kind = $duration <= self::TRIP_SHORT_MAX_SECONDS
+                    ? self::EVENT_KIND_TRIP_SHORT
+                    : self::EVENT_KIND_TRIP_LONG;
+                $label = $this->buildTripLabel($current, $currentArea, $kind);
+                $monthYear = date('F Y', (int)$current[0]['epoch']);
+                $events[] = $this->createDerivedEvent(
+                    $kind,
+                    'trip:' . $kind . ':' . $year . ':' . $currentArea['key'] . ':' . date('Ymd', (int)$current[0]['epoch']),
+                    'Trip to ' . $label . ' · ' . $monthYear,
+                    $label,
+                    $current,
+                );
+
+                $current = [];
+                $currentArea = null;
+            };
+
+            foreach ($items as $item) {
+                $itemArea = $this->tripAreaForItem($item);
+                $epoch = (int)$item['epoch'];
+
+                if ($itemArea === null || $itemArea['key'] === $homeArea['key']) {
+                    $flush();
+                    $lastEpoch = $epoch;
+                    continue;
+                }
+
+                if (
+                    $currentArea !== null &&
+                    ($itemArea['key'] !== $currentArea['key'] || ($lastEpoch !== null && ($epoch - $lastEpoch) > self::TRIP_SEGMENT_GAP_SECONDS))
+                ) {
+                    $flush();
+                }
+
+                $current[] = $item;
+                $currentArea = $itemArea;
+                $lastEpoch = $epoch;
+            }
+
+            $flush();
+        }
+
+        return $events;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $timelineClusters
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectTraditionEvents(array $timelineClusters): array {
+        $groups = [];
+        foreach ($timelineClusters as $cluster) {
+            if (count($cluster['media']) < self::TRADITION_MIN_ITEMS || empty($cluster['location'])) {
+                continue;
+            }
+
+            $person = $this->findDominantPersonCluster($cluster['media']);
+            if ($person === null) {
+                continue;
+            }
+
+            $month = (int)date('n', (int)$cluster['date_start']);
+            $year = (int)date('Y', (int)$cluster['date_start']);
+            $key = $this->slugify((string)$cluster['location']) . ':' . $month . ':' . $person['cluster_id'];
+            $groups[$key]['years'][$year] = true;
+            $groups[$key]['clusters'][] = [
+                'cluster' => $cluster,
+                'person' => $person,
+                'year' => $year,
+            ];
+        }
+
+        $events = [];
+        foreach ($groups as $key => $group) {
+            if (count($group['years']) < 2) {
+                continue;
+            }
+
+            foreach ($group['clusters'] as $entry) {
+                $cluster = $entry['cluster'];
+                $person = $entry['person'];
+                $events[] = $this->createDerivedEvent(
+                    self::EVENT_KIND_TRADITION,
+                    'tradition:' . $key . ':' . $entry['year'],
+                    'Tradition with ' . $person['label'] . ' · ' . $cluster['location'] . ' · ' . $entry['year'],
+                    $cluster['location'],
+                    $cluster['media'],
+                );
+            }
+        }
+
+        return $events;
+    }
+
+    private function detectHomeArea(array $items): ?array {
+        $counts = [];
+        $areas = [];
+        foreach ($items as $item) {
+            $area = $this->tripAreaForItem($item);
+            if ($area === null) {
+                continue;
+            }
+
+            $counts[$area['key']] = ($counts[$area['key']] ?? 0) + 1;
+            $areas[$area['key']] = $area;
+        }
+
+        if (empty($counts)) {
+            return null;
+        }
+
+        arsort($counts);
+        return $areas[array_key_first($counts)] ?? null;
+    }
+
+    private function tripAreaForItem(array $item): ?array {
+        $country = trim((string)($item['country_name'] ?? ''));
+        if ($country === '') {
+            return null;
+        }
+
+        $region = trim((string)($item['region_name'] ?? ''));
+        if (in_array($country, self::LARGE_COUNTRIES, true) && $region !== '') {
+            return [
+                'key' => 'region:' . $this->slugify($country . '-' . $region),
+                'label' => $region,
+                'country' => $country,
+                'city' => trim((string)($item['city_name'] ?? '')),
+            ];
+        }
+
+        return [
+            'key' => 'country:' . $this->slugify($country),
+            'label' => $country,
+            'country' => $country,
+            'city' => trim((string)($item['city_name'] ?? '')),
+        ];
+    }
+
+    private function buildTripLabel(array $items, array $area, string $kind): string {
+        if ($kind === self::EVENT_KIND_TRIP_SHORT) {
+            $cityCounts = [];
+            foreach ($items as $item) {
+                $city = trim((string)($item['city_name'] ?? ''));
+                if ($city !== '') {
+                    $cityCounts[$city] = ($cityCounts[$city] ?? 0) + 1;
+                }
+            }
+            if (!empty($cityCounts)) {
+                arsort($cityCounts);
+                return (string)array_key_first($cityCounts);
+            }
+        }
+
+        return (string)$area['label'];
+    }
+
+    private function findDominantPersonCluster(array $media): ?array {
+        $counts = [];
+        $labels = [];
+        foreach ($media as $item) {
+            foreach ($item['person_clusters'] ?? [] as $person) {
+                $clusterId = (int)($person['cluster_id'] ?? 0);
+                if ($clusterId <= 0) {
+                    continue;
+                }
+                $counts[$clusterId] = ($counts[$clusterId] ?? 0) + 1;
+                $labels[$clusterId] = trim((string)($person['title'] ?? ''));
+            }
+        }
+
+        if (empty($counts)) {
+            return null;
+        }
+
+        arsort($counts);
+        $clusterId = (int)array_key_first($counts);
+        if ($counts[$clusterId] < max(3, (int)ceil(count($media) * 0.30))) {
+            return null;
+        }
+
+        $label = trim((string)($labels[$clusterId] ?? ''));
+        if ($label === '') {
+            $label = 'Person ' . $clusterId;
+        }
+
+        return [
+            'cluster_id' => $clusterId,
+            'label' => $label,
+        ];
+    }
+
+    private function selectMostSpecificTag(array $tagCounts): string {
+        if (empty($tagCounts)) {
+            return 'Animal';
+        }
+
+        uksort($tagCounts, function (string $a, string $b) use ($tagCounts): int {
+            $sa = self::TAG_SPECIFICITY[$a] ?? 5;
+            $sb = self::TAG_SPECIFICITY[$b] ?? 5;
+            if ($sa !== $sb) {
+                return $sb - $sa;
+            }
+            return $tagCounts[$b] <=> $tagCounts[$a];
+        });
+
+        return (string)array_key_first($tagCounts);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $media
+     * @return array<string, mixed>
+     */
+    private function createDerivedEvent(string $kind, string $eventKey, string $title, ?string $location, array $media): array {
+        usort($media, static fn(array $a, array $b): int => (int)$a['epoch'] <=> (int)$b['epoch']);
+
+        return [
+            'event_kind' => $kind,
+            'event_key' => $eventKey,
+            'title' => $title,
+            'location' => $location,
+            'date_start' => (int)$media[0]['epoch'],
+            'date_end' => (int)$media[count($media) - 1]['epoch'],
+            'media' => $media,
+        ];
+    }
+
+    private function slugify(string $value): string {
+        $value = strtolower(trim($value));
+        $value = preg_replace('/[^a-z0-9]+/', '-', $value) ?? '';
+        return trim($value, '-');
+    }
+
     // -------------------------------------------------------------------------
     // Step 3: Persist to Reel tables
     // -------------------------------------------------------------------------
@@ -659,7 +1155,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
     private function loadExistingEventsWithMedia(string $userId): array {
         $qb = $this->db->getQueryBuilder();
-        $qb->select('e.id', 'e.date_start', 'e.date_end', 'e.location', 'm.file_id')
+        $qb->select('e.id', 'e.date_start', 'e.date_end', 'e.location', 'e.event_kind', 'e.event_key', 'm.file_id')
             ->from('reel_events', 'e')
             ->leftJoin('e', 'reel_event_media', 'm', $qb->expr()->eq('e.id', 'm.event_id'))
             ->where($qb->expr()->eq('e.user_id', $qb->createNamedParameter($userId)))
@@ -676,6 +1172,8 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                     'date_start' => (int)$row['date_start'],
                     'date_end' => (int)$row['date_end'],
                     'location' => $row['location'] ?? null,
+                    'event_kind' => $row['event_kind'] ?: self::EVENT_KIND_TIMELINE,
+                    'event_key' => $row['event_key'] ?? null,
                     'file_ids' => [],
                     'file_id_set' => [],
                 ];
@@ -692,6 +1190,21 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
     }
 
     private function findBestExistingEventMatch(array $cluster, array $clusterFileIds, array $existing, array $alreadyMatchedSet): ?int {
+        $clusterKind = (string)($cluster['event_kind'] ?? self::EVENT_KIND_TIMELINE);
+        $clusterKey = $cluster['event_key'] ?? null;
+
+        if ($clusterKind !== self::EVENT_KIND_TIMELINE && is_string($clusterKey) && $clusterKey !== '') {
+            foreach ($existing as $eventId => $event) {
+                if (isset($alreadyMatchedSet[(int)$eventId])) {
+                    continue;
+                }
+                if (($event['event_kind'] ?? self::EVENT_KIND_TIMELINE) === $clusterKind && ($event['event_key'] ?? null) === $clusterKey) {
+                    return (int)$eventId;
+                }
+            }
+            return null;
+        }
+
         if (empty($clusterFileIds)) {
             return null;
         }
@@ -706,6 +1219,10 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
         foreach ($existing as $eventId => $event) {
             if (isset($alreadyMatchedSet[(int)$eventId])) {
+                continue;
+            }
+
+            if (($event['event_kind'] ?? self::EVENT_KIND_TIMELINE) !== self::EVENT_KIND_TIMELINE) {
                 continue;
             }
 
@@ -840,11 +1357,15 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
     private function insertEventWithMedia(string $userId, array $cluster): int {
         $now = time();
         $theme = $this->pickRandomTheme($userId);
+        $eventKind = (string)($cluster['event_kind'] ?? self::EVENT_KIND_TIMELINE);
+        $eventKey = $cluster['event_key'] ?? null;
 
         $qb = $this->db->getQueryBuilder();
         $qb->insert('reel_events')
             ->values([
                 'user_id'    => $qb->createNamedParameter($userId),
+                'event_kind' => $qb->createNamedParameter($eventKind),
+                'event_key'  => $qb->createNamedParameter($eventKey),
                 'title'      => $qb->createNamedParameter($cluster['title']),
                 'date_start' => $qb->createNamedParameter($cluster['date_start'], IQueryBuilder::PARAM_INT),
                 'date_end'   => $qb->createNamedParameter($cluster['date_end'], IQueryBuilder::PARAM_INT),
@@ -880,13 +1401,15 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             throw $e;
         }
 
-        // Apply duplicate suppression only for newly created events.
-        $excluded = $this->duplicateFilter->filterEvent($eventId, $userId);
-        if ($excluded > 0) {
-            $this->logger->debug('Reel: excluded {n} duplicates from new event {id}', [
-                'n' => $excluded,
-                'id' => $eventId,
-            ]);
+        // Apply duplicate suppression only to the normal timeline events.
+        if ($eventKind === self::EVENT_KIND_TIMELINE) {
+            $excluded = $this->duplicateFilter->filterEvent($eventId, $userId);
+            if ($excluded > 0) {
+                $this->logger->debug('Reel: excluded {n} duplicates from new event {id}', [
+                    'n' => $excluded,
+                    'id' => $eventId,
+                ]);
+            }
         }
 
         return $eventId;

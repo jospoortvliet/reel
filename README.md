@@ -1,21 +1,20 @@
 # Reel
 
-Reel is a Nextcloud app that automatically generates highlight videos from your photos and videos. It scans your media library, detects meaningful events (a trip, a party, a day out) by clustering photos by time and location, then renders a polished H.265 MP4 with Ken Burns effects, transitions, and music. The idea is that Memories handles your photo library — Reel turns those memories into something you'd actually watch.
+Reel is a Nextcloud app that automatically generates highlight videos from your photos and videos. It scans your media library, detects meaningful events (a trip, a party, a day out) by clustering photos by time and location, then renders a polished H.265 MP4 with Ken Burns effects, transitions, and music. It builds on (and requires) the Memories app. The idea is that Memories handles your photo library — Reel turns those memories into something easy, fun and quick to watch!
 
 ## Features
 
-* Automatically detects events based on time, location and image tags
+* Automatically detects events based on time, location and image tags from Recognize
 * Manual or automatic creation of videos for each event
 * Videos have a title and various effects
 * Automatically detects and excludes duplicate pictures
 * Automatically detects live photos (Heic + mov file)
 * Videos have music (blended with audio from videos/live photos if included)
 * Allows choosing horizontal, vertical or square video generation
-* Allows choosing audio theme per event
+* Allows choosing music per event, including from your own music selection
 * Allows including/excluding media per event
 * Allows choosing clip or photo for live photos
 * Allows choosing what part of a video to include
-
 
 ## Usage
 
@@ -289,7 +288,7 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [x] Switch short live clips to image
 - [x] Refactor default settings into the initial detection run
 - [x] Support user-provided music folder
-- [ ] choose music automatically (at random...)
+- [x] choose music automatically (at random...)
 - [ ] double check we follow the logic of the animations consistently and improve animation choices
 - [ ] find a way to use the triptych effect occasionally
 - [ ] add perhaps one-two more effects

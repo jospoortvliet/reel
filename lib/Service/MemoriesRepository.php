@@ -293,4 +293,133 @@ class MemoriesRepository {
 
         return $tags;
     }
+
+    /**
+     * Returns face clusters grouped by file id.
+     * Files may contain multiple people; cluster_id <= 0 is ignored.
+     *
+     * Output shape:
+     * [
+     *   fileId => [
+     *     ['cluster_id' => int, 'title' => string],
+     *     ...
+     *   ],
+     * ]
+     *
+     * @param int[] $fileIds
+     * @return array<int, list<array{cluster_id: int, title: string}>>
+     */
+    public function loadFaceClustersForFiles(array $fileIds, string $userId): array {
+        if (empty($fileIds)) {
+            return [];
+        }
+
+        $result = [];
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('d.file_id', 'd.cluster_id', 'c.title')
+                ->from('recognize_face_detections', 'd')
+                ->leftJoin(
+                    'd',
+                    'recognize_face_clusters',
+                    'c',
+                    $qb->expr()->andX(
+                        $qb->expr()->eq('c.id', 'd.cluster_id'),
+                        $qb->expr()->eq('c.user_id', 'd.user_id'),
+                    )
+                )
+                ->where($qb->expr()->in('d.file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->andWhere($qb->expr()->eq('d.user_id', $qb->createNamedParameter($userId)))
+                ->andWhere($qb->expr()->gt('d.cluster_id', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)));
+
+            $seen = [];
+            foreach ($qb->executeQuery()->fetchAll() as $row) {
+                $fileId = (int)$row['file_id'];
+                $clusterId = (int)$row['cluster_id'];
+                $dedupeKey = $fileId . ':' . $clusterId;
+                if (isset($seen[$dedupeKey])) {
+                    continue;
+                }
+                $seen[$dedupeKey] = true;
+                $result[$fileId][] = [
+                    'cluster_id' => $clusterId,
+                    'title' => trim((string)($row['title'] ?? '')),
+                ];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Returns place hierarchy grouped by file id.
+     *
+     * Output shape:
+     * [
+     *   fileId => [
+     *     'country' => ?string,
+     *     'region' => ?string,
+     *     'city' => ?string,
+     *     'timezone' => ?string,
+     *   ],
+     * ]
+     *
+     * @param int[] $fileIds
+     * @return array<int, array{country: ?string, region: ?string, city: ?string, timezone: ?string}>
+     */
+    public function loadPlaceHierarchyForFiles(array $fileIds): array {
+        if (empty($fileIds)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('mp.fileid', 'pl.name', 'pl.admin_level')
+                ->from('memories_places', 'mp')
+                ->innerJoin('mp', 'memories_planet', 'pl', $qb->expr()->eq('mp.osm_id', 'pl.osm_id'))
+                ->where($qb->expr()->in('mp.fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+                ->orderBy('mp.fileid', 'ASC')
+                ->addOrderBy('pl.admin_level', 'ASC');
+
+            $query = $qb->executeQuery();
+            $rows = array_merge($rows, $query->fetchAll());
+            $query->closeCursor();
+        }
+
+        $hierarchy = [];
+        foreach ($rows as $row) {
+            $fileId = (int)$row['fileid'];
+            $name = trim((string)$row['name']);
+            $level = (int)$row['admin_level'];
+            if ($name === '') {
+                continue;
+            }
+
+            $hierarchy[$fileId] ??= [
+                'country' => null,
+                'region' => null,
+                'city' => null,
+                'timezone' => null,
+            ];
+
+            if ($level === -7 && $hierarchy[$fileId]['timezone'] === null) {
+                $hierarchy[$fileId]['timezone'] = $name;
+                continue;
+            }
+            if ($level === 2 && $hierarchy[$fileId]['country'] === null) {
+                $hierarchy[$fileId]['country'] = $name;
+                continue;
+            }
+            if ($level === 4 && $hierarchy[$fileId]['region'] === null) {
+                $hierarchy[$fileId]['region'] = $name;
+                continue;
+            }
+            if ($level >= 8) {
+                $hierarchy[$fileId]['city'] = $name;
+            }
+        }
+
+        return $hierarchy;
+    }
 }
