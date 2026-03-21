@@ -41,7 +41,7 @@ class EventDetectionService {
     // --- Tag-based title enrichment ---
 
     // Fraction of items in a cluster that must carry a tag for it to appear in the title
-    private const TAG_DOMINANT_THRESHOLD = 0.80;
+    private const TAG_DOMINANT_THRESHOLD = 0.70;
 
     // Tags that are too generic, noisy, or meta to add value to an event title
     private const TAG_BLOCKLIST = [
@@ -84,6 +84,7 @@ class EventDetectionService {
     private const EVENT_KIND_YEAR_REVIEW = 'year_review';
     private const EVENT_KIND_SEASON = 'season';
     private const EVENT_KIND_TRADITION = 'tradition';
+    private const EVENT_KIND_TIMELINE_SUB = 'timeline_sub';
 
     private const PET_YEAR_MIN_ITEMS = 10;
     private const PERSON_YEAR_MIN_ITEMS = 10;
@@ -183,15 +184,15 @@ class EventDetectionService {
         // 2. Build the normal timeline events plus derived yearly/special events.
         $timelineClusters = $this->clusterIntoEvents($media);
         $tripEvents = $this->detectTripEvents($media);
-        // Drop timeline clusters whose photos are substantially covered by a trip event —
-        // e.g. the sleep-split sub-segments of a multi-day trip should not produce
-        // separate "Brussels · January 2026" events alongside the trip event itself.
-        $timelineClusters = $this->filterTimelineClustersAbsorbedByTrips($timelineClusters, $tripEvents);
+        $tripDeDup = $this->splitTimelineClustersAgainstTrips($timelineClusters, $tripEvents);
+        $timelineClusters = $tripDeDup['timeline'];
+        $tripSubEvents = $tripDeDup['sub_events'];
         $clusters = array_merge(
             $timelineClusters,
             $this->detectPetYearEvents($media),
             $this->detectPersonYearEvents($media),
             $tripEvents,
+            $tripSubEvents,
             $this->detectYearReviewEvents($media),
             $this->detectSeasonalEvents($media),
             $this->detectTraditionEvents($timelineClusters),
@@ -591,6 +592,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
         $cluster['location'] = $location;
         $cluster['title']    = $this->buildTitle($cluster['date_start'], $location, $tag);
+        $cluster['dominant_tag'] = $tag;
         $cluster['event_kind'] = self::EVENT_KIND_TIMELINE;
         $cluster['event_key'] = null;
 
@@ -895,7 +897,20 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                 $itemArea = $this->tripAreaForItem($item);
                 $epoch = (int)$item['epoch'];
 
-                if ($itemArea === null || $itemArea['key'] === $homeArea['key']) {
+                if ($itemArea === null) {
+                    // Missing place hierarchy should not break an ongoing trip segment
+                    // when the timeline remains contiguous.
+                    if (
+                        $currentArea !== null &&
+                        ($lastEpoch === null || ($epoch - $lastEpoch) <= self::TRIP_SEGMENT_GAP_SECONDS)
+                    ) {
+                        $current[] = $item;
+                    }
+                    $lastEpoch = $epoch;
+                    continue;
+                }
+
+                if ($itemArea['key'] === $homeArea['key']) {
                     $flush();
                     $lastEpoch = $epoch;
                     continue;
@@ -920,61 +935,88 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
     }
 
     /**
-     * Removes timeline clusters that are substantially absorbed by a trip event.
+     * Splits timeline clusters into:
+     * - top-level timeline clusters that stay visible in the main list, and
+     * - absorbed clusters moved under the owning trip as child sub-events.
      *
-     * When >= TRIP_ABSORB_THRESHOLD (90%) of a cluster's files appear in the file set
-     * of any trip event, the cluster is redundant and should not produce a separate
-     * "Location · Month Year" event alongside the trip.
+     * Tagged timeline clusters are always preserved as top-level events.
      *
      * @param array<int, array<string, mixed>> $timelineClusters
      * @param array<int, array<string, mixed>> $tripEvents
-     * @return array<int, array<string, mixed>>
+     * @return array{timeline: array<int, array<string, mixed>>, sub_events: array<int, array<string, mixed>>}
      */
-    private function filterTimelineClustersAbsorbedByTrips(array $timelineClusters, array $tripEvents): array {
+    private function splitTimelineClustersAgainstTrips(array $timelineClusters, array $tripEvents): array {
         if (empty($tripEvents)) {
-            return $timelineClusters;
+            return [
+                'timeline' => $timelineClusters,
+                'sub_events' => [],
+            ];
         }
 
-        // Pre-build a flipped file-id set for every trip event (O(1) lookup)
         $tripFileSets = [];
         foreach ($tripEvents as $trip) {
             $fileIds = array_map(static fn(array $item): int => (int)$item['fileid'], $trip['media']);
-            $tripFileSets[] = array_flip($fileIds);
+            $tripFileSets[] = [
+                'event_key' => (string)($trip['event_key'] ?? ''),
+                'set' => array_flip($fileIds),
+            ];
         }
 
-        $filtered = [];
-        foreach ($timelineClusters as $cluster) {
-            $clusterFileIds = array_map(static fn(array $item): int => (int)$item['fileid'], $cluster['media']);
-            $total = count($clusterFileIds);
+        $keptTimeline = [];
+        $subEvents = [];
 
-            $absorbed = false;
-            foreach ($tripFileSets as $tripFileSet) {
+        foreach ($timelineClusters as $cluster) {
+            if (!empty($cluster['dominant_tag'])) {
+                $keptTimeline[] = $cluster;
+                continue;
+            }
+
+            $clusterFileIds = array_map(static fn(array $item): int => (int)$item['fileid'], $cluster['media']);
+            $clusterFileIds = array_values(array_unique($clusterFileIds));
+            $total = count($clusterFileIds);
+            if ($total === 0) {
+                $keptTimeline[] = $cluster;
+                continue;
+            }
+
+            $bestCoverage = 0.0;
+            $bestTripKey = null;
+
+            foreach ($tripFileSets as $tripData) {
                 $covered = 0;
                 foreach ($clusterFileIds as $fid) {
-                    if (isset($tripFileSet[$fid])) {
+                    if (isset($tripData['set'][$fid])) {
                         $covered++;
                     }
                 }
-                if ($total > 0 && ($covered / $total) >= self::TRIP_ABSORB_THRESHOLD) {
-                    $absorbed = true;
-                    $this->logger->debug(
-                        'Reel: suppressing timeline cluster "{title}" ({count} items, {pct}% covered by a trip event)',
-                        [
-                            'title' => $cluster['title'],
-                            'count' => $total,
-                            'pct'   => round(($covered / $total) * 100),
-                        ]
-                    );
-                    break;
+
+                $coverage = $covered / $total;
+                if ($coverage > $bestCoverage) {
+                    $bestCoverage = $coverage;
+                    $bestTripKey = $tripData['event_key'];
                 }
             }
 
-            if (!$absorbed) {
-                $filtered[] = $cluster;
+            if ($bestCoverage >= self::TRIP_ABSORB_THRESHOLD && is_string($bestTripKey) && $bestTripKey !== '') {
+                $subEvents[] = $this->createTimelineSubEvent($cluster, $bestTripKey);
+                $this->logger->debug(
+                    'Reel: moving timeline cluster "{title}" under trip {trip_key} ({pct}% overlap)',
+                    [
+                        'title' => $cluster['title'],
+                        'trip_key' => $bestTripKey,
+                        'pct' => round($bestCoverage * 100),
+                    ]
+                );
+                continue;
             }
+
+            $keptTimeline[] = $cluster;
         }
 
-        return $filtered;
+        return [
+            'timeline' => $keptTimeline,
+            'sub_events' => $subEvents,
+        ];
     }
 
     /**
@@ -1159,6 +1201,31 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         ];
     }
 
+    /**
+     * @param array<string, mixed> $cluster
+     * @return array<string, mixed>
+     */
+    private function createTimelineSubEvent(array $cluster, string $parentTripEventKey): array {
+        $fileIds = array_values(array_unique(array_map(
+            static fn(array $item): int => (int)$item['fileid'],
+            $cluster['media']
+        )));
+        sort($fileIds, SORT_NUMERIC);
+
+        $eventKey = 'trip-sub:' . $this->slugify($parentTripEventKey) . ':' . md5(implode(',', $fileIds));
+
+        return [
+            'event_kind' => self::EVENT_KIND_TIMELINE_SUB,
+            'event_key' => $eventKey,
+            'parent_event_key' => $parentTripEventKey,
+            'title' => (string)$cluster['title'],
+            'location' => $cluster['location'] ?? null,
+            'date_start' => (int)$cluster['date_start'],
+            'date_end' => (int)$cluster['date_end'],
+            'media' => $cluster['media'],
+        ];
+    }
+
     private function slugify(string $value): string {
         $value = strtolower(trim($value));
         $value = preg_replace('/[^a-z0-9]+/', '-', $value) ?? '';
@@ -1172,8 +1239,10 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
     private function persistClustersIncremental(string $userId, array $clusters): void {
         $existing = $this->loadExistingEventsWithMedia($userId);
         $matchedEventIds = []; // keyed set for O(1) lookup
+        $eventKeyToId = $this->buildExistingEventKeyMap($existing);
 
         foreach ($clusters as $cluster) {
+            $cluster = $this->attachParentEventId($cluster, $eventKeyToId);
             $clusterFileIds = array_values(array_map(
                 static fn(array $item): int => (int)$item['fileid'],
                 $cluster['media']
@@ -1184,11 +1253,17 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                 $this->updateEventRow($eventId, $cluster);
                 $this->syncEventMedia($eventId, $userId, $cluster['media']);
                 $matchedEventIds[$eventId] = true;
+                if (!empty($cluster['event_key'])) {
+                    $eventKeyToId[(string)$cluster['event_key']] = $eventId;
+                }
                 continue;
             }
 
             $newEventId = $this->insertEventWithMedia($userId, $cluster);
             $matchedEventIds[$newEventId] = true;
+            if (!empty($cluster['event_key'])) {
+                $eventKeyToId[(string)$cluster['event_key']] = $newEventId;
+            }
         }
 
         foreach ($existing as $eventId => $_event) {
@@ -1200,9 +1275,14 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
     private function persistClustersRebuild(string $userId, array $clusters): void {
         $this->clearEventsForUser($userId);
+        $eventKeyToId = [];
 
         foreach ($clusters as $cluster) {
-            $this->insertEventWithMedia($userId, $cluster);
+            $cluster = $this->attachParentEventId($cluster, $eventKeyToId);
+            $newEventId = $this->insertEventWithMedia($userId, $cluster);
+            if (!empty($cluster['event_key'])) {
+                $eventKeyToId[(string)$cluster['event_key']] = $newEventId;
+            }
         }
     }
 
@@ -1220,7 +1300,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
     private function loadExistingEventsWithMedia(string $userId): array {
         $qb = $this->db->getQueryBuilder();
-        $qb->select('e.id', 'e.date_start', 'e.date_end', 'e.location', 'e.event_kind', 'e.event_key', 'm.file_id')
+        $qb->select('e.id', 'e.date_start', 'e.date_end', 'e.location', 'e.event_kind', 'e.event_key', 'e.parent_event_id', 'm.file_id')
             ->from('reel_events', 'e')
             ->leftJoin('e', 'reel_event_media', 'm', $qb->expr()->eq('e.id', 'm.event_id'))
             ->where($qb->expr()->eq('e.user_id', $qb->createNamedParameter($userId)))
@@ -1239,6 +1319,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                     'location' => $row['location'] ?? null,
                     'event_kind' => $row['event_kind'] ?: self::EVENT_KIND_TIMELINE,
                     'event_key' => $row['event_key'] ?? null,
+                    'parent_event_id' => $row['parent_event_id'] !== null ? (int)$row['parent_event_id'] : null,
                     'file_ids' => [],
                     'file_id_set' => [],
                 ];
@@ -1252,6 +1333,37 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         }
 
         return $events;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $existing
+     * @return array<string, int>
+     */
+    private function buildExistingEventKeyMap(array $existing): array {
+        $map = [];
+        foreach ($existing as $event) {
+            $eventKey = $event['event_key'] ?? null;
+            if (is_string($eventKey) && $eventKey !== '') {
+                $map[$eventKey] = (int)$event['id'];
+            }
+        }
+        return $map;
+    }
+
+    /**
+     * @param array<string, mixed> $cluster
+     * @param array<string, int> $eventKeyToId
+     * @return array<string, mixed>
+     */
+    private function attachParentEventId(array $cluster, array $eventKeyToId): array {
+        $parentEventKey = $cluster['parent_event_key'] ?? null;
+        if (!is_string($parentEventKey) || $parentEventKey === '') {
+            $cluster['parent_event_id'] = null;
+            return $cluster;
+        }
+
+        $cluster['parent_event_id'] = $eventKeyToId[$parentEventKey] ?? null;
+        return $cluster;
     }
 
     private function findBestExistingEventMatch(array $cluster, array $clusterFileIds, array $existing, array $alreadyMatchedSet): ?int {
@@ -1339,6 +1451,9 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             ->set('date_start', $qb->createNamedParameter((int)$cluster['date_start'], IQueryBuilder::PARAM_INT))
             ->set('date_end', $qb->createNamedParameter((int)$cluster['date_end'], IQueryBuilder::PARAM_INT))
             ->set('location', $qb->createNamedParameter($cluster['location']))
+            ->set('parent_event_id', $cluster['parent_event_id'] === null
+                ? $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL)
+                : $qb->createNamedParameter((int)$cluster['parent_event_id'], IQueryBuilder::PARAM_INT))
             ->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
             ->where($qb->expr()->eq('id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
             ->executeStatement();
@@ -1435,6 +1550,9 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                 'date_start' => $qb->createNamedParameter($cluster['date_start'], IQueryBuilder::PARAM_INT),
                 'date_end'   => $qb->createNamedParameter($cluster['date_end'], IQueryBuilder::PARAM_INT),
                 'location'   => $qb->createNamedParameter($cluster['location']),
+                'parent_event_id' => $cluster['parent_event_id'] === null
+                    ? $qb->createNamedParameter(null, IQueryBuilder::PARAM_NULL)
+                    : $qb->createNamedParameter((int)$cluster['parent_event_id'], IQueryBuilder::PARAM_INT),
                 'theme'      => $qb->createNamedParameter($theme),
                 'created_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),
                 'updated_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),

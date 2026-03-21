@@ -621,7 +621,7 @@ class VideoRenderingService {
             $onDebug,
         );
     }
-        /**
+    /**
      * Pass 2: stitch all intermediate clips together with xfade transitions.
      *
      * Uses a binary merge tree (tournament bracket) so each clip is re-encoded

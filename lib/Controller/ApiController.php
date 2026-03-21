@@ -54,6 +54,7 @@ class ApiController extends OCSController {
             ->from('reel_events', 'e')
             ->leftJoin('e', 'reel_event_media', 'm', $qb->expr()->eq('e.id', 'm.event_id'))
             ->where($qb->expr()->eq('e.user_id', $qb->createNamedParameter($this->userId)))
+            ->andWhere($qb->expr()->isNull('e.parent_event_id'))
             ->groupBy('e.id')
             ->orderBy('e.date_start', 'DESC');
 
@@ -110,6 +111,7 @@ class ApiController extends OCSController {
         }
 
         $event['media'] = $this->fetchMedia($id);
+        $event['sub_events'] = $this->fetchSubEvents($id);
         $event['job']   = null;
 
         if (!empty($event['video_file_id'])) {
@@ -360,6 +362,32 @@ class ApiController extends OCSController {
             }
 
             return $row;
+        }, $rows);
+    }
+
+    private function fetchSubEvents(int $parentEventId): array {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select('e.id', 'e.title', 'e.date_start', 'e.date_end', 'e.location', 'e.video_file_id')
+            ->selectAlias($qb->createFunction('COUNT(m.id)'), 'media_count')
+            ->from('reel_events', 'e')
+            ->leftJoin('e', 'reel_event_media', 'm', $qb->expr()->eq('e.id', 'm.event_id'))
+            ->where($qb->expr()->eq('e.user_id', $qb->createNamedParameter($this->userId)))
+            ->andWhere($qb->expr()->eq('e.parent_event_id', $qb->createNamedParameter($parentEventId, IQueryBuilder::PARAM_INT)))
+            ->groupBy('e.id')
+            ->orderBy('e.date_start', 'ASC')
+            ->addOrderBy('e.id', 'ASC');
+
+        $rows = $qb->executeQuery()->fetchAll();
+        return array_map(static function (array $row): array {
+            return [
+                'id' => (int)$row['id'],
+                'title' => (string)$row['title'],
+                'date_start' => (int)$row['date_start'],
+                'date_end' => (int)$row['date_end'],
+                'location' => $row['location'] ?? null,
+                'video_file_id' => $row['video_file_id'] !== null ? (int)$row['video_file_id'] : null,
+                'media_count' => (int)($row['media_count'] ?? 0),
+            ];
         }, $rows);
     }
 

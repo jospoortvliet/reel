@@ -67,9 +67,20 @@ interface MediaItem {
 	effective_video_length?: number
 }
 
+interface SubEvent {
+	id: number
+	title: string
+	date_start: number
+	date_end: number
+	location: string | null
+	video_file_id: number | null
+	media_count: number
+}
+
 interface EventDetail extends Event {
 	video_path: string | null
 	media: MediaItem[]
+	sub_events?: SubEvent[]
 }
 
 interface MusicOption {
@@ -162,6 +173,10 @@ async function loadEventById(id: number) {
 	} finally {
 		loading.value = false
 	}
+}
+
+async function openSubEvent(id: number) {
+	await router.push({ name: 'event', params: { id } })
 }
 
 // -------------------------------------------------------------------------
@@ -619,6 +634,31 @@ watch(() => route.params.id, async (id) => {
 					<span :class="[$style.ncIcon, 'icon-close']" aria-hidden="true" /> {{ t('reel', 'Render failed:') }} {{ selectedEvent.job?.error }}
 				</div>
 
+				<!-- Sub-events (duplicate slices grouped under this event) -->
+				<div
+					v-if="selectedEvent.sub_events && selectedEvent.sub_events.length > 0"
+					:class="$style.subEventsWrap">
+					<div :class="$style.subEventsHeader">
+						<h3>{{ t('reel', 'Sub-events') }}</h3>
+						<p>{{ t('reel', 'Detected slices inside this event. Open one to review or render separately.') }}</p>
+					</div>
+					<div :class="$style.subEventsGrid">
+						<div
+							v-for="sub in selectedEvent.sub_events"
+							:key="sub.id"
+							:class="$style.subEventCard">
+							<div>
+								<h4 :class="$style.subEventTitle">{{ sub.title }}</h4>
+								<p :class="$style.subEventMeta">{{ formatDateRange(sub.date_start, sub.date_end) }}</p>
+								<p :class="$style.subEventMeta">{{ sub.media_count }} {{ t('reel', 'items') }}</p>
+							</div>
+							<NcButton @click="openSubEvent(sub.id)">
+								{{ t('reel', 'Open') }}
+							</NcButton>
+						</div>
+					</div>
+				</div>
+
 				<!-- Media grid -->
 				<div :class="$style.mediaGrid">
 					<div
@@ -944,6 +984,55 @@ watch(() => route.params.id, async (id) => {
 	margin-bottom: 6px;
 	display: flex;
 	justify-content: space-between;
+}
+
+.subEventsWrap {
+	margin-bottom: 24px;
+	padding: 14px;
+	border: 1px solid var(--color-border);
+	border-radius: var(--border-radius-large);
+	background: var(--color-background-dark);
+}
+
+.subEventsHeader h3 {
+	margin: 0;
+	font-size: 1rem;
+}
+
+.subEventsHeader p {
+	margin: 4px 0 0;
+	font-size: 0.84rem;
+	color: var(--color-text-maxcontrast);
+}
+
+.subEventsGrid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+	gap: 10px;
+	margin-top: 12px;
+}
+
+.subEventCard {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 10px;
+	background: var(--color-main-background);
+	border: 1px solid var(--color-border);
+	border-radius: var(--border-radius);
+	padding: 10px 12px;
+}
+
+.subEventTitle {
+	margin: 0 0 2px;
+	font-size: 0.9rem;
+	font-weight: 600;
+}
+
+.subEventMeta {
+	margin: 0;
+	font-size: 0.8rem;
+	color: var(--color-text-maxcontrast);
 }
 
 .progressPct {
