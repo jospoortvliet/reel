@@ -10,6 +10,7 @@ import NcContent from '@nextcloud/vue/components/NcContent'
 import NcEmptyContent from '@nextcloud/vue/components/NcEmptyContent'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import NcButton from '@nextcloud/vue/components/NcButton'
+import NcSelect from '@nextcloud/vue/components/NcSelect'
 import { showError, showSuccess } from '@nextcloud/dialogs'
 import axios from '@nextcloud/axios'
 import { generateOcsUrl, generateUrl } from '@nextcloud/router'
@@ -90,6 +91,12 @@ const clipEditorItem = ref<MediaItem | null>(null)
 const clipStart = ref(0)
 const clipLength = ref(2)
 let   pollTimer     = null as ReturnType<typeof setInterval> | null
+
+const currentTheme = computed(() => {
+	if (!selectedEvent.value) return 'indie_pop'
+	const theme = selectedEvent.value.theme ?? 'indie_pop'
+	return musicOptions.value.some(o => o.value === theme) ? theme : 'indie_pop'
+})
 
 const defaultThemeOptions: MusicOption[] = [
 	{ value: 'acoustic_folk', label: t('reel', 'Acoustic Folk (random)'), kind: 'genre' },
@@ -555,19 +562,18 @@ watch(() => route.params.id, async (id) => {
 						<p>{{ formatDateRange(selectedEvent.date_start, selectedEvent.date_end) }}</p>
 						<p>{{ includedCount }} {{ t('reel', 'of') }} {{ selectedEvent.media.length }} {{ t('reel', 'items included') }}</p>
 						<div :class="$style.themeRow">
-								<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Soundtrack') }}</label>
-							<select
-								id="theme-select"
-								:class="$style.themeSelect"
-									:value="musicOptions.some((opt) => opt.value === (selectedEvent.theme ?? '')) ? selectedEvent.theme : 'indie_pop'"
-									@change="updateEventTheme(($event.target as HTMLSelectElement).value || 'indie_pop')">
-								<option
-									v-for="opt in musicOptions"
-									:key="opt.value"
-									:value="opt.value">
-									{{ opt.label }}
-								</option>
-							</select>
+							<label :class="$style.themeLabel" for="theme-select">{{ t('reel', 'Soundtrack') }}</label>
+							<div :class="$style.themeSelectWrap">
+								<NcSelect
+									input-id="theme-select"
+									:options="musicOptions"
+									label="label"
+									:reduce="(opt: MusicOption) => opt.value"
+									:model-value="currentTheme"
+									:clearable="false"
+									:placeholder="t('reel', 'Select soundtrack…')"
+									@update:model-value="updateEventTheme($event as string)" />
+							</div>
 						</div>
 					</div>
 					<div :class="$style.actions">
@@ -911,6 +917,12 @@ watch(() => route.params.id, async (id) => {
 .themeLabel {
 	font-size: 0.85rem;
 	color: var(--color-text-maxcontrast);
+}
+
+.themeSelectWrap {
+	min-width: 220px;
+	flex: 1;
+	max-width: 420px;
 }
 
 .themeSelect {

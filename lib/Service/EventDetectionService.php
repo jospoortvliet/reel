@@ -47,6 +47,7 @@ class EventDetectionService {
         private DuplicateFilterService $duplicateFilter,
         private MemoriesRepository   $memoriesRepository,
         private IRootFolder          $rootFolder,
+        private MusicService         $musicService,
     ) {}
 
     /**
@@ -731,6 +732,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
     private function insertEventWithMedia(string $userId, array $cluster): int {
         $now = time();
+        $theme = $this->pickRandomTheme($userId);
 
         $qb = $this->db->getQueryBuilder();
         $qb->insert('reel_events')
@@ -740,6 +742,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                 'date_start' => $qb->createNamedParameter($cluster['date_start'], IQueryBuilder::PARAM_INT),
                 'date_end'   => $qb->createNamedParameter($cluster['date_end'], IQueryBuilder::PARAM_INT),
                 'location'   => $qb->createNamedParameter($cluster['location']),
+                'theme'      => $qb->createNamedParameter($theme),
                 'created_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),
                 'updated_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),
             ])
@@ -780,6 +783,14 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         }
 
         return $eventId;
+    }
+
+    private function pickRandomTheme(string $userId): string {
+        $options = $this->musicService->getMusicOptions($userId);
+        if (empty($options)) {
+            return 'indie_pop';
+        }
+        return $options[random_int(0, count($options) - 1)]['value'];
     }
 
     private function deleteEvent(int $eventId, string $userId): void {
