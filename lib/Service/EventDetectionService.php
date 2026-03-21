@@ -94,6 +94,8 @@ class EventDetectionService {
     private const TRIP_SHORT_MAX_SECONDS = 4 * 24 * 3600;
     private const TRIP_LONG_MAX_SECONDS = 28 * 24 * 3600;
     private const TRIP_SEGMENT_GAP_SECONDS = 3 * 24 * 3600;
+    // A timeline cluster is suppressed when this fraction of its files are covered by a trip event
+    private const TRIP_ABSORB_THRESHOLD = 0.9;
 
     private const LARGE_COUNTRIES = [
         'United States', 'USA', 'United States of America',
@@ -180,11 +182,16 @@ class EventDetectionService {
 
         // 2. Build the normal timeline events plus derived yearly/special events.
         $timelineClusters = $this->clusterIntoEvents($media);
+        $tripEvents = $this->detectTripEvents($media);
+        // Drop timeline clusters whose photos are substantially covered by a trip event —
+        // e.g. the sleep-split sub-segments of a multi-day trip should not produce
+        // separate "Brussels · January 2026" events alongside the trip event itself.
+        $timelineClusters = $this->filterTimelineClustersAbsorbedByTrips($timelineClusters, $tripEvents);
         $clusters = array_merge(
             $timelineClusters,
             $this->detectPetYearEvents($media),
             $this->detectPersonYearEvents($media),
-            $this->detectTripEvents($media),
+            $tripEvents,
             $this->detectYearReviewEvents($media),
             $this->detectSeasonalEvents($media),
             $this->detectTraditionEvents($timelineClusters),
@@ -910,6 +917,64 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         }
 
         return $events;
+    }
+
+    /**
+     * Removes timeline clusters that are substantially absorbed by a trip event.
+     *
+     * When >= TRIP_ABSORB_THRESHOLD (90%) of a cluster's files appear in the file set
+     * of any trip event, the cluster is redundant and should not produce a separate
+     * "Location · Month Year" event alongside the trip.
+     *
+     * @param array<int, array<string, mixed>> $timelineClusters
+     * @param array<int, array<string, mixed>> $tripEvents
+     * @return array<int, array<string, mixed>>
+     */
+    private function filterTimelineClustersAbsorbedByTrips(array $timelineClusters, array $tripEvents): array {
+        if (empty($tripEvents)) {
+            return $timelineClusters;
+        }
+
+        // Pre-build a flipped file-id set for every trip event (O(1) lookup)
+        $tripFileSets = [];
+        foreach ($tripEvents as $trip) {
+            $fileIds = array_map(static fn(array $item): int => (int)$item['fileid'], $trip['media']);
+            $tripFileSets[] = array_flip($fileIds);
+        }
+
+        $filtered = [];
+        foreach ($timelineClusters as $cluster) {
+            $clusterFileIds = array_map(static fn(array $item): int => (int)$item['fileid'], $cluster['media']);
+            $total = count($clusterFileIds);
+
+            $absorbed = false;
+            foreach ($tripFileSets as $tripFileSet) {
+                $covered = 0;
+                foreach ($clusterFileIds as $fid) {
+                    if (isset($tripFileSet[$fid])) {
+                        $covered++;
+                    }
+                }
+                if ($total > 0 && ($covered / $total) >= self::TRIP_ABSORB_THRESHOLD) {
+                    $absorbed = true;
+                    $this->logger->debug(
+                        'Reel: suppressing timeline cluster "{title}" ({count} items, {pct}% covered by a trip event)',
+                        [
+                            'title' => $cluster['title'],
+                            'count' => $total,
+                            'pct'   => round(($covered / $total) * 100),
+                        ]
+                    );
+                    break;
+                }
+            }
+
+            if (!$absorbed) {
+                $filtered[] = $cluster;
+            }
+        }
+
+        return $filtered;
     }
 
     /**
