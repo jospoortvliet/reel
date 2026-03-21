@@ -96,8 +96,7 @@ class VideoRenderingService {
             // Pass 1: normalize each item to an intermediate clip
             $clips = $this->normalizeItems($items, $tempDir, $onProgress, $onDebug);
 
-            // Pass 2: concatenate intermediates into final output
-            if ($onProgress) { $onProgress(90); }
+            // Pass 2+3: stitch + final encode
             $outputFolder    = $this->ensureOutputFolder($userFolder);
             $outputName      = $this->buildOutputFilename($event);
             $localOutputPath = $tempDir . '/final.mp4';
@@ -108,6 +107,7 @@ class VideoRenderingService {
                     $event,
                     $event['theme'] ?? null,
                     $userId,
+                    $onProgress,
                     $onDebug,
                 );
 
@@ -196,7 +196,7 @@ class VideoRenderingService {
                 ];
 
                 if ($onProgress) {
-                    $progress = (int)(1 + ((min($total, $index + 3)) / $total) * 88);
+                    $progress = (int)(1 + ((min($total, $index + 3)) / $total) * 54);
                     $onProgress($progress);
                 }
 
@@ -243,9 +243,9 @@ class VideoRenderingService {
                 'breaker_type' => $item['is_video'] ? 'video' : 'none',
             ];
 
-            // Report progress: clips take up 1-89%, Pass 2 gets 90-99%
+            // Report progress: clips take up 1-55%.
             if ($onProgress) {
-                $progress = (int)(1 + (($index + 1) / $total) * 88);
+                $progress = (int)(1 + (($index + 1) / $total) * 54);
                 $onProgress($progress);
             }
         }
@@ -582,7 +582,7 @@ class VideoRenderingService {
     // Pass 3: Final encode with music, titles, fade → H.265 output
     // -------------------------------------------------------------------------
  
-    private function concatenateIntermediates(array $clips, string $outputPath, array $event, ?string $theme, string $userId, ?callable $onDebug = null): void {
+    private function concatenateIntermediates(array $clips, string $outputPath, array $event, ?string $theme, string $userId, ?callable $onProgress = null, ?callable $onDebug = null): void {
         $count = count($clips);
  
         if ($count === 0) {
@@ -598,6 +598,7 @@ class VideoRenderingService {
                 $event,
                 $theme,
                 $userId,
+                $onProgress,
                 $onDebug,
             );
             return;
@@ -607,7 +608,7 @@ class VideoRenderingService {
         $tempDir = dirname($outputPath);
         $stitchedPath = $tempDir . '/stitched.mp4';
  
-        $this->runTransitionStitchPass($clips, $stitchedPath, $onDebug);
+        $this->runTransitionStitchPass($clips, $stitchedPath, $onProgress, $onDebug);
  
         // Pass 3: final encode with music, titles, fade → H.265
         $totalDuration = $this->computeTimelineDuration($clips);
@@ -618,6 +619,7 @@ class VideoRenderingService {
             $event,
             $theme,
             $userId,
+            $onProgress,
             $onDebug,
         );
     }
@@ -637,10 +639,12 @@ class VideoRenderingService {
      *   clips     — the original $clips[] entries it was built from, in order
      *               (needed to pick the correct transition at the join point)
      */
-    private function runTransitionStitchPass(array $clips, string $outputPath, ?callable $onDebug = null): void {
+    private function runTransitionStitchPass(array $clips, string $outputPath, ?callable $onProgress = null, ?callable $onDebug = null): void {
         $count = count($clips);
         $tempDir = dirname($outputPath);
         $stepCounter = 0;
+        $completedMergeSteps = 0;
+        $totalMergeSteps = max(1, $count - 1);
  
         // Initialise the working set: each clip is its own segment.
         $segments = [];
@@ -759,6 +763,13 @@ class VideoRenderingService {
                 }
  
                 $this->runFfmpeg($cmd);
+                $completedMergeSteps++;
+
+                // Pass 2 stitching covers 56-90%.
+                if ($onProgress) {
+                    $stitchProgress = 55 + (int)round(($completedMergeSteps / $totalMergeSteps) * 35);
+                    $onProgress(max(56, min(90, $stitchProgress)));
+                }
  
                 // Clean up temp files we own (not original clip files).
                 if ($left['owned'])  { @unlink($left['path']); }
@@ -791,8 +802,13 @@ class VideoRenderingService {
         array $event,
         ?string $theme,
         string $userId,
+        ?callable $onProgress = null,
         ?callable $onDebug = null,
     ): void {
+        if ($onProgress) {
+            $onProgress(91);
+        }
+
         $musicPath = $this->getMusicPath($theme, $userId);
         $hasMusic  = $musicPath && file_exists($musicPath);
  
@@ -894,6 +910,10 @@ class VideoRenderingService {
             $onDebug("FFmpeg final encode cmd: " . implode(' ', array_map('escapeshellarg', $cmd)));
         }
         $this->runFfmpeg($cmd);
+
+        if ($onProgress) {
+            $onProgress(100);
+        }
     }
  
     private function computeTimelineDuration(array $clips): float {

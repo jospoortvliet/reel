@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Event media selection pipeline now runs in this order per new event: utility prefilter → duplicate burst filter → distinctness filter.
 - Utility prefilter includes conservative guardrails: never auto-exclude videos, face-rich shots, first/last event media, or first media after a large time gap.
+- Render progress reporting is rebalanced by phase: normalization 1–55%, transition stitching 56–90%, final encode/mux 91–100%.
 
 ### Debugging
 
