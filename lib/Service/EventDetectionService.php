@@ -38,6 +38,44 @@ class EventDetectionService {
     // We prefer the most specific level available
     private const PREFERRED_ADMIN_LEVELS = [8, 7, 6, 5, 4];
 
+    // --- Tag-based title enrichment ---
+
+    // Fraction of items in a cluster that must carry a tag for it to appear in the title
+    private const TAG_DOMINANT_THRESHOLD = 0.80;
+
+    // Tags that are too generic, noisy, or meta to add value to an event title
+    private const TAG_BLOCKLIST = [
+        'Tagged by recognize', // prefix — matches any version string
+        'People', 'Furniture', 'Landscape', 'Nature', 'Indoor', 'Outdoor',
+        'Building', 'Info', 'Sand', 'Water', 'Display', 'Screen', 'Living',
+        'Electronics', 'Vehicle', 'Document', 'Architecture', 'Object',
+        'Structure', 'Transport', 'Text', 'Art', 'Still Life', 'Technology',
+    ];
+
+    /**
+     * Specificity score for known tags. Higher = more specific = preferred when
+     * multiple tags exceed the dominance threshold. Tags not listed get score 5.
+     */
+    private const TAG_SPECIFICITY = [
+        // Animals – specific beats generic
+        'Dog' => 20, 'Cat' => 20, 'Bird' => 20, 'Horse' => 20,
+        'Fish' => 20, 'Rabbit' => 20,
+        'Animal' => 8, 'Pet' => 8,
+        // Nature – specific beats generic
+        'Seashore' => 18, 'Beach' => 15, 'Mountains' => 18, 'Alpine' => 15,
+        'Forest' => 12, 'Snow' => 12, 'Waterfall' => 18, 'Desert' => 15,
+        // Activities / scenes
+        'Camping' => 18, 'Skiing' => 18, 'Cycling' => 15, 'Swimming' => 15,
+        'Stage' => 12, 'Concert' => 18, 'Music' => 12, 'Sport' => 8,
+        // Landmarks
+        'Church' => 12, 'Historic' => 10, 'Tower' => 10, 'Shop' => 8,
+        'Restaurant' => 12,
+        // People
+        'Portrait' => 10,
+        // Food
+        'Food' => 8, 'Dining' => 8,
+    ];
+
     /** @var (callable(string):void)|null */
     private $debugCallback = null;
 
@@ -73,6 +111,14 @@ class EventDetectionService {
             'count' => count($media),
             'user'  => $userId,
         ]);
+
+        // 1b. Enrich each media item with its systemtags (for title enrichment)
+        $fileIds = array_map(static fn(array $i): int => (int)$i['fileid'], $media);
+        $tagMap  = $this->memoriesRepository->loadTagsForFiles($fileIds);
+        foreach ($media as &$item) {
+            $item['tags'] = $tagMap[(int)$item['fileid']] ?? [];
+        }
+        unset($item);
 
         // 2. Cluster into events
         $clusters = $this->clusterIntoEvents($media);
@@ -427,6 +473,11 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
                     $current['place_counts'][$item['place_name']]
                         = ($current['place_counts'][$item['place_name']] ?? 0) + 1;
                 }
+
+                // Accumulate tag counts
+                foreach ($item['tags'] ?? [] as $tag) {
+                    $current['tag_counts'][$tag] = ($current['tag_counts'][$tag] ?? 0) + 1;
+                }
             }
         }
 
@@ -441,10 +492,15 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
 
     private function newCluster(array $item): array {
         $epoch = (int)$item['epoch'];
+        $tagCounts = [];
+        foreach ($item['tags'] ?? [] as $tag) {
+            $tagCounts[$tag] = 1;
+        }
         return [
             'date_start'   => $epoch,
             'date_end'     => $epoch,
             'place_counts' => empty($item['place_name']) ? [] : [$item['place_name'] => 1],
+            'tag_counts'   => $tagCounts,
             'media'        => [$item],
         ];
     }
@@ -457,10 +513,12 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             $location = array_key_first($cluster['place_counts']);
         }
 
-        $cluster['location'] = $location;
-        $cluster['title']    = $this->buildTitle($cluster['date_start'], $location);
+        $tag = $this->findDominantTag($cluster['tag_counts'] ?? [], count($cluster['media']));
 
-        unset($cluster['place_counts']); // no longer needed
+        $cluster['location'] = $location;
+        $cluster['title']    = $this->buildTitle($cluster['date_start'], $location, $tag);
+
+        unset($cluster['place_counts'], $cluster['tag_counts']); // no longer needed
         return $cluster;
     }
 
@@ -492,9 +550,58 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
      * Builds a human-readable event title, e.g. "Barcelona · March 2026"
      * or just "March 2026" if no location is known.
      */
-    private function buildTitle(int $epoch, ?string $location): string {
+    private function buildTitle(int $epoch, ?string $location, ?string $tag = null): string {
         $date = (new \DateTime())->setTimestamp($epoch)->format('F Y');
-        return $location ? "{$location} · {$date}" : $date;
+        $parts = array_filter([$location, $tag, $date]);
+        return implode(' · ', $parts);
+    }
+
+    /**
+     * Given a map of tag → occurrence-count and total item count for a cluster,
+     * returns the single most-specific tag that exceeds TAG_DOMINANT_THRESHOLD,
+     * or null if none qualifies.
+     *
+     * @param array<string, int> $tagCounts
+     */
+    private function findDominantTag(array $tagCounts, int $totalItems): ?string {
+        if ($totalItems === 0 || empty($tagCounts)) {
+            return null;
+        }
+
+        $threshold = (int)ceil($totalItems * self::TAG_DOMINANT_THRESHOLD);
+
+        $qualifying = [];
+        foreach ($tagCounts as $tag => $count) {
+            if ($count >= $threshold && !$this->isTagBlocked($tag)) {
+                $qualifying[$tag] = $count;
+            }
+        }
+
+        if (empty($qualifying)) {
+            return null;
+        }
+
+        // Sort by specificity desc, then by count desc
+        uksort($qualifying, function (string $a, string $b) use ($qualifying): int {
+            $sa = self::TAG_SPECIFICITY[$a] ?? 5;
+            $sb = self::TAG_SPECIFICITY[$b] ?? 5;
+            if ($sa !== $sb) {
+                return $sb - $sa;
+            }
+            return $qualifying[$b] - $qualifying[$a];
+        });
+
+        return array_key_first($qualifying);
+    }
+
+    private function isTagBlocked(string $tag): bool {
+        $lower = strtolower($tag);
+        foreach (self::TAG_BLOCKLIST as $blocked) {
+            if (str_starts_with($lower, strtolower($blocked))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------

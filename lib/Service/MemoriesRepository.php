@@ -258,4 +258,39 @@ class MemoriesRepository {
 
         return array_map(static fn(array $value): string => $value['name'], $placeMap);
     }
+
+    /**
+     * Returns systemtag names (from Recognize or manual) grouped by file id.
+     * objectid is stored as VARCHAR so file ids are cast to strings for the query.
+     *
+     * Output shape: [fileId => ['TagName', ...]]
+     *
+     * @param int[] $fileIds
+     * @return array<int, list<string>>
+     */
+    public function loadTagsForFiles(array $fileIds): array {
+        if (empty($fileIds)) {
+            return [];
+        }
+
+        $tags = [];
+        foreach (array_chunk($fileIds, 1000) as $chunk) {
+            $stringIds = array_map('strval', $chunk);
+            $qb = $this->db->getQueryBuilder();
+            $qb->select('m.objectid', 't.name')
+                ->from('systemtag_object_mapping', 'm')
+                ->innerJoin('m', 'systemtag', 't', $qb->expr()->eq('t.id', 'm.systemtagid'))
+                ->where($qb->expr()->eq('m.objecttype', $qb->createNamedParameter('files')))
+                ->andWhere($qb->expr()->in(
+                    'm.objectid',
+                    $qb->createNamedParameter($stringIds, IQueryBuilder::PARAM_STR_ARRAY),
+                ));
+
+            foreach ($qb->executeQuery()->fetchAll() as $row) {
+                $tags[(int)$row['objectid']][] = (string)$row['name'];
+            }
+        }
+
+        return $tags;
+    }
 }
