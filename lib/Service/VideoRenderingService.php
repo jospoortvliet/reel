@@ -578,255 +578,305 @@ class VideoRenderingService {
     }
 
     // -------------------------------------------------------------------------
-    // Pass 2: Concatenate intermediates into final output
+    // Pass 2: Concatenate with transitions → H.264 intermediate
+    // Pass 3: Final encode with music, titles, fade → H.265 output
     // -------------------------------------------------------------------------
-
+ 
     private function concatenateIntermediates(array $clips, string $outputPath, array $event, ?string $theme, string $userId, ?callable $onDebug = null): void {
         $count = count($clips);
-
+ 
         if ($count === 0) {
             throw new \RuntimeException('No clips to concatenate');
         }
-
-        if ($count > 1) {
-            $this->concatenateWithTransitions($clips, $outputPath, $event, $theme, $userId, $onDebug);
+ 
+        if ($count === 1) {
+            // Single clip: skip transition pass, go straight to final encode
+            $this->runFinalEncodePass(
+                $clips[0]['path'],
+                (float)$clips[0]['duration'],
+                $outputPath,
+                $event,
+                $theme,
+                $userId,
+                $onDebug,
+            );
             return;
         }
-
-        $intermediates = array_map(static fn(array $clip): string => (string)$clip['path'], $clips);
-
-        // Write a concat list file — all intermediates are identical format
-        // so the concat demuxer handles any number of inputs without filter_complex limits
-        $concatFile = dirname($intermediates[0]) . '/concat.txt';
-        $lines = [];
-        foreach ($intermediates as $path) {
-            $escaped = str_replace("'", "'\\''", $path);
-            $lines[] = "file '{$escaped}'";
-        }
-        file_put_contents($concatFile, implode("\n", $lines) . "\n");
-
-        $musicPath = $this->getMusicPath($theme, $userId);
-        $hasMusic  = $musicPath && file_exists($musicPath);
-        $targetDuration = array_sum(array_map(static fn(array $clip): float => (float)($clip['duration'] ?? 0.0), $clips));
-        $fadeDuration = min(self::MUSIC_FADE_OUT_SECONDS, max(0.0, $targetDuration));
-        $fadeStart = max(0.0, $targetDuration - $fadeDuration);
-        $fadeDurationStr = number_format($fadeDuration, 3, '.', '');
-        $fadeStartStr = number_format($fadeStart, 3, '.', '');
-        $targetDurationStr = number_format(max(0.0, $targetDuration), 3, '.', '');
-
-        $cmd = ['ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', $concatFile,
-        ];
-
-        if ($hasMusic) {
-            $cmd = array_merge($cmd, [
-                '-stream_loop', '-1',
-                '-i', $musicPath,
-                '-filter_complex',
-                '[1:a]aresample=async=1:first_pts=0,atrim=duration=' . $targetDurationStr
-                    . ',volume=' . self::MUSIC_BASE_VOLUME
-                    . ',afade=t=out:st=' . $fadeStartStr . ':d=' . $fadeDurationStr . '[music];'
-                    . '[0:a]asplit=2[nat_mix][nat_sc];'
-                    . '[music][nat_sc]sidechaincompress=threshold=0.03:ratio=7:attack=20:release=250[ducked];'
-                    . '[ducked][nat_mix]amix=inputs=2:duration=longest:dropout_transition=0:weights=' . self::MUSIC_DUCKED_VOLUME . ' 1:normalize=0[aout]',
-                '-map', '0:v',
-                '-map', '[aout]',
-            ]);
-        } else {
-            $cmd = array_merge($cmd, [
-                '-map', '0:v',
-                '-map', '0:a',
-            ]);
-        }
-
-        $cmd = array_merge($cmd, [
-            '-c:v', 'libx265',
-            '-crf', '23',
-            '-preset', 'fast',
-            '-tag:v', 'hvc1',       // Apple/QuickTime compatible H.265 tag
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-movflags', '+faststart',
+ 
+        // Pass 2: transitions only → H.264 stitched (low memory, no music/x265)
+        $tempDir = dirname($outputPath);
+        $stitchedPath = $tempDir . '/stitched.mp4';
+ 
+        $this->runTransitionStitchPass($clips, $stitchedPath, $onDebug);
+ 
+        // Pass 3: final encode with music, titles, fade → H.265
+        $totalDuration = $this->computeTimelineDuration($clips);
+        $this->runFinalEncodePass(
+            $stitchedPath,
+            $totalDuration,
             $outputPath,
-        ]);
-
-        $this->logger->info('Reel: running final concat pass ({n} clips)', ['n' => $count]);
-        // Note: $onDebug not available here as this is a separate method
-        $this->runFfmpeg($cmd);
+            $event,
+            $theme,
+            $userId,
+            $onDebug,
+        );
+    }
+        /**
+     * Pass 2: stitch all intermediate clips together with xfade transitions.
+     *
+     * Uses a binary merge tree (tournament bracket) so each clip is re-encoded
+     * at most ceil(log2(n)) times rather than n times. For 25 clips that's 5
+     * generations instead of 24, and for 130 clips it's 7 instead of 129.
+     *
+     * Memory is bounded: each FFmpeg call has exactly 2 inputs.
+     * Quality loss is bounded: at most ceil(log2(n)) lossy re-encodes per frame.
+     *
+     * Each "segment" in the working set carries:
+     *   path      — path to the encoded file
+     *   duration  — total duration of the encoded file
+     *   clips     — the original $clips[] entries it was built from, in order
+     *               (needed to pick the correct transition at the join point)
+     */
+    private function runTransitionStitchPass(array $clips, string $outputPath, ?callable $onDebug = null): void {
+        $count = count($clips);
+        $tempDir = dirname($outputPath);
+        $stepCounter = 0;
+ 
+        // Initialise the working set: each clip is its own segment.
+        $segments = [];
+        foreach ($clips as $clip) {
+            $segments[] = [
+                'path'     => (string)$clip['path'],
+                'duration' => (float)$clip['duration'],
+                'clips'    => [$clip],
+                'owned'    => false,   // original clip files are not ours to delete
+            ];
+        }
+ 
+        // Merge pairs until one segment remains.
+        while (count($segments) > 1) {
+            $nextRound = [];
+            $segCount  = count($segments);
+ 
+            for ($j = 0; $j < $segCount; $j += 2) {
+                if ($j + 1 >= $segCount) {
+                    // Odd one out — carry it forward unchanged.
+                    $nextRound[] = $segments[$j];
+                    continue;
+                }
+ 
+                $left  = $segments[$j];
+                $right = $segments[$j + 1];
+ 
+                // The transition at the join point is determined by the last clip
+                // of the left segment and the first clip of the right segment.
+                // We use the original clip index in the global array for pickTransitionSpec.
+                $leftLastClip  = end($left['clips']);
+                $rightFirstClip = reset($right['clips']);
+                $globalRightIndex = array_search($rightFirstClip, $clips, true);
+                if ($globalRightIndex === false) {
+                    // Fallback: use count of left clips as a proxy index.
+                    $globalRightIndex = count($left['clips']);
+                }
+ 
+                $transitionSpec     = $this->pickTransitionSpec($leftLastClip, $rightFirstClip, (int)$globalRightIndex);
+                $transitionDuration = (float)$transitionSpec['duration'];
+                $offset             = max(0.0, $left['duration'] - $transitionDuration);
+ 
+                $stepCounter++;
+                $isFinalMerge = (count($segments) === 2 && $j === 0);
+                $mergedPath   = $isFinalMerge
+                    ? $outputPath
+                    : $tempDir . '/merge_' . $stepCounter . '.mp4';
+ 
+                $filterParts = [
+                    '[0:v]settb=AVTB,format=yuv420p[va]',
+                    '[1:v]settb=AVTB,format=yuv420p[vb]',
+                ];
+ 
+                if (($transitionSpec['type'] ?? '') === 'triptych_strip') {
+                    $invert    = !empty($transitionSpec['invert']);
+                    $leftDir   = $invert ? 'wiperight' : 'wipeleft';
+                    $midDir    = $invert ? 'wipeleft'  : 'wiperight';
+                    $offsetStr = number_format($offset, 3, '.', '');
+ 
+                    $filterParts[] = '[va]split=3[a0][a1][a2]';
+                    $filterParts[] = '[vb]split=3[b0][b1][b2]';
+                    $filterParts[] = '[a0]crop=iw/3:ih:0:0[sa0]';
+                    $filterParts[] = '[a1]crop=iw/3:ih:iw/3:0[sa1]';
+                    $filterParts[] = '[a2]crop=iw/3:ih:2*iw/3:0[sa2]';
+                    $filterParts[] = '[b0]crop=iw/3:ih:0:0[sb0]';
+                    $filterParts[] = '[b1]crop=iw/3:ih:iw/3:0[sb1]';
+                    $filterParts[] = '[b2]crop=iw/3:ih:2*iw/3:0[sb2]';
+                    $filterParts[] = "[sa0][sb0]xfade=transition={$leftDir}:duration={$transitionDuration}:offset={$offsetStr}[x0]";
+                    $filterParts[] = "[sa1][sb1]xfade=transition={$midDir}:duration={$transitionDuration}:offset={$offsetStr}[x1]";
+                    $filterParts[] = "[sa2][sb2]xfade=transition={$leftDir}:duration={$transitionDuration}:offset={$offsetStr}[x2]";
+                    $filterParts[] = '[x0][x1][x2]hstack=inputs=3[vout]';
+                } else {
+                    $transition  = (string)$transitionSpec['name'];
+                    $filterParts[] = "[va][vb]xfade=transition={$transition}"
+                        . ':duration=' . number_format($transitionDuration, 3, '.', '')
+                        . ':offset='   . number_format($offset, 3, '.', '') . '[vout]';
+                }
+ 
+                // Audio crossfade at the join point.
+                $leftAudioDur  = max(0.05, $left['duration']  - ($transitionDuration / 2.0));
+                $rightAudioDur = max(0.05, $right['duration'] - ($transitionDuration / 2.0));
+                $crossfade     = max(0.02, min(self::AUDIO_CROSSFADE_SECONDS,
+                    min($leftAudioDur, $rightAudioDur) * 0.45));
+ 
+                $filterParts[] = '[0:a]aformat=sample_rates=44100:channel_layouts=stereo'
+                    . ',atrim=duration=' . number_format($leftAudioDur, 3, '.', '')
+                    . ',asetpts=PTS-STARTPTS[al]';
+                $filterParts[] = '[1:a]aformat=sample_rates=44100:channel_layouts=stereo'
+                    . ',atrim=duration=' . number_format($rightAudioDur, 3, '.', '')
+                    . ',asetpts=PTS-STARTPTS[ar]';
+                $filterParts[] = '[al][ar]acrossfade=d='
+                    . number_format($crossfade, 3, '.', '') . ':o=0:c1=tri:c2=tri[aout]';
+ 
+                $cmd = [
+                    'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                    '-i', $left['path'],
+                    '-i', $right['path'],
+                    '-filter_complex', implode(';', $filterParts),
+                    '-map', '[vout]',
+                    '-map', '[aout]',
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '16',
+                    '-c:a', 'aac',
+                    '-ar', '44100',
+                    '-ac', '2',
+                    '-movflags', '+faststart',
+                    $mergedPath,
+                ];
+ 
+                if ($onDebug) {
+                    $leftLabel  = basename($left['path']);
+                    $rightLabel = basename($right['path']);
+                    $onDebug("FFmpeg merge step {$stepCounter} ({$leftLabel} + {$rightLabel}): "
+                        . implode(' ', array_map('escapeshellarg', $cmd)));
+                }
+ 
+                $this->runFfmpeg($cmd);
+ 
+                // Clean up temp files we own (not original clip files).
+                if ($left['owned'])  { @unlink($left['path']); }
+                if ($right['owned']) { @unlink($right['path']); }
+ 
+                $mergedDuration = $left['duration'] + $right['duration'] - $transitionDuration;
+ 
+                $nextRound[] = [
+                    'path'     => $mergedPath,
+                    'duration' => $mergedDuration,
+                    'clips'    => array_merge($left['clips'], $right['clips']),
+                    'owned'    => true,
+                ];
+            }
+ 
+            $segments = $nextRound;
+        }
+ 
+        $this->logger->info('Reel: transition stitch pass complete ({n} merge steps)', ['n' => $stepCounter]);
     }
 
-    private function concatenateWithTransitions(array $clips, string $outputPath, array $event, ?string $theme, string $userId, ?callable $onDebug = null): void {
-        $count = count($clips);
+    /**
+     * Pass 3: take a single stitched video, add titles, music, outro fade, encode H.265.
+     * Only 1 video input → x265 lookahead is tiny, peak memory is minimal.
+     */
+    private function runFinalEncodePass(
+        string $stitchedPath,
+        float $timelineDuration,
+        string $outputPath,
+        array $event,
+        ?string $theme,
+        string $userId,
+        ?callable $onDebug = null,
+    ): void {
         $musicPath = $this->getMusicPath($theme, $userId);
-        $hasMusic = $musicPath && file_exists($musicPath);
-
-        $cmd = ['ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error'];
-        foreach ($clips as $clip) {
-            $cmd[] = '-i';
-            $cmd[] = (string)$clip['path'];
-        }
+        $hasMusic  = $musicPath && file_exists($musicPath);
+ 
+        $cmd = ['ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-i', $stitchedPath,
+        ];
         if ($hasMusic) {
-            $cmd[] = '-stream_loop';
-            $cmd[] = '-1';
-            $cmd[] = '-i';
-            $cmd[] = $musicPath;
+            $cmd[] = '-stream_loop'; $cmd[] = '-1';
+            $cmd[] = '-i'; $cmd[] = $musicPath;
         }
-
+ 
         $filterParts = [];
-        for ($i = 0; $i < $count; $i++) {
-            $filterParts[] = "[{$i}:v]settb=AVTB,format=yuv420p[v{$i}]";
-        }
-
-        $accumulated = (float)$clips[0]['duration'];
-        $videoLabel = 'v0';
-        $audioLabel = '';
-        $transitionDurations = array_fill(0, max(0, $count - 1), 0.0);
-
-        for ($i = 1; $i < $count; $i++) {
-            $transitionSpec = $this->pickTransitionSpec($clips[$i - 1], $clips[$i], $i);
-            $transitionDuration = (float)$transitionSpec['duration'];
-            $transitionDurations[$i - 1] = $transitionDuration;
-            $offset = max(0.0, $accumulated - $transitionDuration);
-            $newVideoLabel = 'vx' . $i;
-            if (($transitionSpec['type'] ?? '') === 'triptych_strip') {
-                $invert = !empty($transitionSpec['invert']);
-                $leftDir = $invert ? 'wiperight' : 'wipeleft';
-                $midDir = $invert ? 'wipeleft' : 'wiperight';
-                $rightDir = $leftDir;
-                $offsetStr = number_format($offset, 3, '.', '');
-
-                $a0 = "ta{$i}_0";
-                $a1 = "ta{$i}_1";
-                $a2 = "ta{$i}_2";
-                $b0 = "tb{$i}_0";
-                $b1 = "tb{$i}_1";
-                $b2 = "tb{$i}_2";
-                $x0 = "tx{$i}_0";
-                $x1 = "tx{$i}_1";
-                $x2 = "tx{$i}_2";
-
-                $filterParts[] = "[{$videoLabel}]split=3[{$a0}][{$a1}][{$a2}]";
-                $filterParts[] = "[v{$i}]split=3[{$b0}][{$b1}][{$b2}]";
-
-                $filterParts[] = "[{$a0}]crop=iw/3:ih:0:0[s{$a0}]";
-                $filterParts[] = "[{$a1}]crop=iw/3:ih:iw/3:0[s{$a1}]";
-                $filterParts[] = "[{$a2}]crop=iw/3:ih:2*iw/3:0[s{$a2}]";
-                $filterParts[] = "[{$b0}]crop=iw/3:ih:0:0[s{$b0}]";
-                $filterParts[] = "[{$b1}]crop=iw/3:ih:iw/3:0[s{$b1}]";
-                $filterParts[] = "[{$b2}]crop=iw/3:ih:2*iw/3:0[s{$b2}]";
-
-                $filterParts[] = "[s{$a0}][s{$b0}]xfade=transition={$leftDir}:duration={$transitionDuration}:offset={$offsetStr}[{$x0}]";
-                $filterParts[] = "[s{$a1}][s{$b1}]xfade=transition={$midDir}:duration={$transitionDuration}:offset={$offsetStr}[{$x1}]";
-                $filterParts[] = "[s{$a2}][s{$b2}]xfade=transition={$rightDir}:duration={$transitionDuration}:offset={$offsetStr}[{$x2}]";
-                $filterParts[] = "[{$x0}][{$x1}][{$x2}]hstack=inputs=3[{$newVideoLabel}]";
-            } else {
-                $transition = (string)$transitionSpec['name'];
-                $filterParts[] = "[{$videoLabel}][v{$i}]xfade=transition={$transition}:duration={$transitionDuration}:offset=" . number_format($offset, 3, '.', '') . "[{$newVideoLabel}]";
-            }
-
-            $accumulated += (float)$clips[$i]['duration'] - $transitionDuration;
-            $videoLabel = $newVideoLabel;
-        }
-
+        $videoLabel  = '0:v';
+ 
+        // Title overlays
         $introTitle = trim((string)($event['title'] ?? ''));
-        $introDate = '';
+        $introDate  = '';
         if (!empty($event['date_start'])) {
-            $dt = (new \DateTimeImmutable('@' . (int)$event['date_start']))->setTimezone(new \DateTimeZone(date_default_timezone_get()));
+            $dt = (new \DateTimeImmutable('@' . (int)$event['date_start']))
+                ->setTimezone(new \DateTimeZone(date_default_timezone_get()));
             $introDate = $dt->format('F j, Y');
         }
-
+ 
         if ($introTitle !== '') {
-            $titleEsc = $this->escapeDrawtext($introTitle);
+            $titleEsc   = $this->escapeDrawtext($introTitle);
             $enableExpr = "lte(t," . number_format(self::INTRO_TEXT_DURATION_SECONDS, 3, '.', '') . ")";
-            $titleLabel = 'vtitle';
-            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$titleEsc}':fontcolor=white:fontsize=64:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6-text_h-8):enable='{$enableExpr}'[{$titleLabel}]";
-            $videoLabel = $titleLabel;
+            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$titleEsc}':fontcolor=white"
+                . ":fontsize=64:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6-text_h-8)"
+                . ":enable='{$enableExpr}'[vtitle]";
+            $videoLabel = 'vtitle';
         }
-
+ 
         if ($introDate !== '') {
-            $dateEsc = $this->escapeDrawtext($introDate);
+            $dateEsc    = $this->escapeDrawtext($introDate);
             $enableExpr = "lte(t," . number_format(self::INTRO_TEXT_DURATION_SECONDS, 3, '.', '') . ")";
-            $dateLabel = 'vdate';
-            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$dateEsc}':fontcolor=white:fontsize=40:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6+8):enable='{$enableExpr}'[{$dateLabel}]";
-            $videoLabel = $dateLabel;
+            $filterParts[] = "[{$videoLabel}]drawtext=font=Sans:text='{$dateEsc}':fontcolor=white"
+                . ":fontsize=40:borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h*5/6+8)"
+                . ":enable='{$enableExpr}'[vdate]";
+            $videoLabel = 'vdate';
         }
-
-        // End fade logic:
-        // - fade lasts 3s
-        // - keep at least 1s unobstructed final clip before fade starts
-        // - if needed, freeze-frame extend the tail so fade has room
-        $lastClipDuration = (float)($clips[$count - 1]['duration'] ?? 0.0);
-        $incomingTransition = $count > 1 ? (float)$transitionDurations[$count - 2] : 0.0;
-        $unobstructedStart = max(0.0, $accumulated - $lastClipDuration + $incomingTransition);
-        $minimumFadeStart = $unobstructedStart + 1.0;
-
+ 
+        // Outro fade to black — freeze-extend tail if needed so fade has room
         $outroFadeDuration = self::OUTRO_VIDEO_FADE_SECONDS;
-        $baseFadeStart = max(0.0, $accumulated - $outroFadeDuration);
-        $fadeStart = max($baseFadeStart, $minimumFadeStart);
-        $tailHold = max(0.0, ($fadeStart + $outroFadeDuration) - $accumulated);
-
+        $fadeStart         = max(0.0, $timelineDuration - $outroFadeDuration);
+        $tailHold          = max(0.0, ($fadeStart + $outroFadeDuration) - $timelineDuration);
+ 
         if ($tailHold > 0.0) {
-            $tailHoldStr = number_format($tailHold, 3, '.', '');
-            $holdLabel = 'vhold';
-            $filterParts[] = "[{$videoLabel}]tpad=stop_mode=clone:stop_duration={$tailHoldStr}[{$holdLabel}]";
-            $videoLabel = $holdLabel;
+            $filterParts[] = "[{$videoLabel}]tpad=stop_mode=clone:stop_duration="
+                . number_format($tailHold, 3, '.', '') . "[vhold]";
+            $videoLabel = 'vhold';
         }
-
-        $fadeLabel = 'voutro';
+ 
         $filterParts[] = "[{$videoLabel}]fade=t=out:st=" . number_format($fadeStart, 3, '.', '')
-            . ":d=" . number_format($outroFadeDuration, 3, '.', '')
-            . "[{$fadeLabel}]";
-        $videoLabel = $fadeLabel;
-        $timelineDuration = max($accumulated, $fadeStart + $outroFadeDuration);
-
-        $audioInputs = [];
-        $audioDurations = [];
-        for ($i = 0; $i < $count; $i++) {
-            $leftTransition = $i > 0 ? (float)$transitionDurations[$i - 1] : 0.0;
-            $rightTransition = $i < ($count - 1) ? (float)$transitionDurations[$i] : 0.0;
-            $rawAudioDuration = (float)$clips[$i]['duration'] - ($leftTransition / 2.0) - ($rightTransition / 2.0);
-            $audioDuration = max(0.05, $rawAudioDuration);
-            $audioDurations[] = $audioDuration;
-            $audioDurationStr = number_format($audioDuration, 3, '.', '');
-            $filterParts[] = "[{$i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=duration={$audioDurationStr},asetpts=PTS-STARTPTS[a{$i}]";
-            $audioInputs[] = "[a{$i}]";
-        }
-
-        // Add a subtle audio fade between adjacent clip segments.
-        // Use non-overlapping mode (o=0) so total audio duration remains aligned
-        // with the visual timeline and doesn't shrink by fade lengths.
-        $audioLabel = 'a0';
-        for ($i = 1; $i < $count; $i++) {
-            $maxFadeByLen = min((float)$audioDurations[$i - 1], (float)$audioDurations[$i]) * 0.45;
-            $crossfade = max(0.02, min(self::AUDIO_CROSSFADE_SECONDS, $maxFadeByLen));
-            $crossfadeStr = number_format($crossfade, 3, '.', '');
-            $newAudioLabel = 'ax' . $i;
-            $filterParts[] = "[{$audioLabel}][a{$i}]acrossfade=d={$crossfadeStr}:o=0:c1=tri:c2=tri[{$newAudioLabel}]";
-            $audioLabel = $newAudioLabel;
-        }
-
+            . ":d=" . number_format($outroFadeDuration, 3, '.', '') . "[voutro]";
+        $videoLabel = 'voutro';
+ 
+        $totalDuration = $fadeStart + $outroFadeDuration;
+ 
+        // Music + natural audio with sidechain ducking
+        $audioLabel = '0:a';
         if ($hasMusic) {
-            $musicInputIndex = $count;
-            $fadeDuration = min(self::OUTRO_VIDEO_FADE_SECONDS, max(0.0, $timelineDuration));
-            $fadeStart = max(0.0, $timelineDuration - $fadeDuration);
-            $filterParts[] = "[{$musicInputIndex}:a]aresample=async=1:first_pts=0,atrim=duration="
-                . number_format($timelineDuration, 3, '.', '')
+            $musicIdx       = 1;
+            $fadeDuration   = min(self::OUTRO_VIDEO_FADE_SECONDS, $totalDuration);
+            $musicFadeStart = max(0.0, $totalDuration - $fadeDuration);
+            $filterParts[] = "[{$musicIdx}:a]aresample=async=1:first_pts=0"
+                . ",atrim=duration=" . number_format($totalDuration, 3, '.', '')
                 . ",volume=" . self::MUSIC_BASE_VOLUME
-                . ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '')
-                . ":d=" . number_format($fadeDuration, 3, '.', '')
-                . "[music]";
-            $filterParts[] = "[{$audioLabel}]asplit=2[acat_mix][acat_sc]";
-            $filterParts[] = "[music][acat_sc]sidechaincompress=threshold=0.03:ratio=7:attack=20:release=250[ducked]";
-            $filterParts[] = "[ducked][acat_mix]amix=inputs=2:duration=longest:dropout_transition=0:weights=" . self::MUSIC_DUCKED_VOLUME . " 1:normalize=0[aout]";
+                . ",afade=t=out:st=" . number_format($musicFadeStart, 3, '.', '')
+                . ":d=" . number_format($fadeDuration, 3, '.', '') . "[music]";
+            $filterParts[] = "[0:a]asplit=2[anat_mix][anat_sc]";
+            $filterParts[] = "[music][anat_sc]sidechaincompress=threshold=0.03:ratio=7:attack=20:release=250[ducked]";
+            $filterParts[] = "[ducked][anat_mix]amix=inputs=2:duration=longest:dropout_transition=0"
+                . ":weights=" . self::MUSIC_DUCKED_VOLUME . " 1:normalize=0[aout]";
             $audioLabel = 'aout';
         }
-
-        $cmd = array_merge($cmd, [
-            '-filter_complex', implode(';', $filterParts),
-            '-map', "[{$videoLabel}]",
-            '-map', "[{$audioLabel}]",
+ 
+        if (!empty($filterParts)) {
+            $cmd[] = '-filter_complex';
+            $cmd[] = implode(';', $filterParts);
+        }
+ 
+        $cmd[] = '-map'; $cmd[] = "[{$videoLabel}]";
+        $cmd[] = '-map'; $cmd[] = $hasMusic ? "[{$audioLabel}]" : "0:a";
+        $cmd   = array_merge($cmd, [
             '-c:v', 'libx265',
             '-crf', '23',
             '-preset', 'fast',
@@ -836,12 +886,28 @@ class VideoRenderingService {
             '-movflags', '+faststart',
             $outputPath,
         ]);
-
-        $this->logger->info('Reel: running transition concat pass ({n} clips)', ['n' => $count]);
+ 
+        $this->logger->info('Reel: running final encode pass (duration={d}s)', [
+            'd' => number_format($totalDuration, 1),
+        ]);
         if ($onDebug) {
-            $onDebug("FFmpeg concat cmd: " . implode(' ', array_map('escapeshellarg', $cmd)));
+            $onDebug("FFmpeg final encode cmd: " . implode(' ', array_map('escapeshellarg', $cmd)));
         }
         $this->runFfmpeg($cmd);
+    }
+ 
+    private function computeTimelineDuration(array $clips): float {
+        $count = count($clips);
+        if ($count === 0) {
+            return 0.0;
+        }
+ 
+        $accumulated = (float)$clips[0]['duration'];
+        for ($i = 1; $i < $count; $i++) {
+            $spec = $this->pickTransitionSpec($clips[$i - 1], $clips[$i], $i);
+            $accumulated += (float)$clips[$i]['duration'] - (float)$spec['duration'];
+        }
+        return $accumulated;
     }
 
     private function escapeDrawtext(string $text): string {
@@ -1158,46 +1224,18 @@ class VideoRenderingService {
                     $sourceW = (int)$dims['w'];
                     $sourceH = (int)$dims['h'];
                     $sourceAspect = $sourceH > 0 ? ($sourceW / $sourceH) : 0.0;
-                    $mode = $isVideo ? 'video' : (string)($motion['mode'] ?? 'zoom');
-                    $style = $isVideo ? 'video' : (string)($motion['style'] ?? 'apple_subtle');
-                    $panEngine = $isVideo ? 'none' : (string)($motion['pan_engine'] ?? 'none');
                     $msg = sprintf(
-                        '  Motion debug: file_id=%d src=%dx%d aspect=%.4f style=%s mode=%s pan_engine=%s zoom=%.3f->%.3f fx=%.4f',
+                        '  Motion debug: file_id=%d src=%dx%d aspect=%.4f',
                         (int)$row['file_id'],
                         $sourceW,
                         $sourceH,
                         $sourceAspect,
-                        $style,
-                        $mode,
-                        $panEngine,
-                        (float)($motion['zoom_start'] ?? 1.0),
-                        (float)($motion['zoom_end'] ?? 1.0),
-                        (float)($motion['fx'] ?? 0.5),
                     );
 
                     if ($isVideo) {
                         $msg .= sprintf(' duration=%.2fs start=%.2fs live=%s', $duration, $videoStartAt, $useLive ? 'yes' : 'no');
-                    } elseif ($mode === 'pan_x') {
-                        $msg .= sprintf(
-                            ' fx=%.4f->%.4f fy=%.4f duration=%.2fs',
-                            (float)($motion['fx_start'] ?? 0.5),
-                            (float)($motion['fx_end'] ?? 0.5),
-                            (float)($motion['fy'] ?? 0.5),
-                            (float)$duration,
-                        );
-                    } elseif ($mode === 'pan_y') {
-                        $msg .= sprintf(
-                            ' fy=%.4f->%.4f duration=%.2fs',
-                            (float)($motion['fy_start'] ?? 0.5),
-                            (float)($motion['fy_end'] ?? 0.5),
-                            (float)$duration,
-                        );
                     } else {
-                        $msg .= sprintf(' fy=%.4f duration=%.2fs', (float)($motion['fy'] ?? 0.5), (float)$duration);
-                    }
-
-                    if (!$isVideo && isset($motion['run_motion'], $motion['run_remaining'])) {
-                        $msg .= sprintf(' run=%s(%d)', (string)$motion['run_motion'], (int)$motion['run_remaining']);
+                        $msg .= sprintf(' fy=%.4f duration=%.2fs', (float)($motion['fy'] ?? 0.5), (float)$duration); // this needs fixing - to contain info about the actual motion (zoom/pan, if any).
                     }
 
                     $msg .= ' path=' . basename($localPath);
