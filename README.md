@@ -2,6 +2,21 @@
 
 Reel is a Nextcloud app that automatically generates highlight videos from your photos and videos. It scans your media library, detects meaningful events (a trip, a party, a day out) by clustering photos by time and location, then renders a polished H.265 MP4 with Ken Burns effects, transitions, and music. The idea is that Memories handles your photo library — Reel turns those memories into something you'd actually watch.
 
+## Features
+
+* Automatically detects events based on time, location and image tags
+* Manual or automatic creation of videos for each event
+* Videos have a title and various effects
+* Automatically detects and excludes duplicate pictures
+* Automatically detects live photos (Heic + mov file)
+* Videos have music (blended with audio from videos/live photos if included)
+* Allows choosing horizontal, vertical or square video generation
+* Allows choosing audio theme per event
+* Allows including/excluding media per event
+* Allows choosing clip or photo for live photos
+* Allows choosing what part of a video to include
+
+
 ## Usage
 
 ### Requirements
@@ -272,7 +287,9 @@ Tag push triggers the workflow and publishes the release archives automatically.
 - [ ] adress some rendering bugs
 - [x] improve the video opening and closing
 - [ ] switch short live clips to image
+- [x] refactor default settings into the initial detection run
 - [ ] double check we follow the logic of the animations consistently
+- [ ] choose audio automatically (at random...)
 - [ ] improve naming of events using tags where possible
 - [ ] create a number of 'special' events
 - [ ] change the live photo icon to one more... like a live photo icon!

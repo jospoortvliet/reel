@@ -1025,27 +1025,20 @@ class VideoRenderingService {
         $rows   = $result->fetchAll();
         $result->closeCursor();
 
-        // Resolve use_live_video per row
-        $outputOrientation = $this->config->getUserValue(
-            $userId,
-            Application::APP_ID,
-            'output_orientation',
-            'landscape_16_9',
-        );
-        $outputIsLandscape = ($outputOrientation === 'landscape_16_9');
-
         foreach ($rows as &$row) {
             $settings = !empty($row['edit_settings'])
                 ? (json_decode($row['edit_settings'], true) ?? [])
                 : [];
 
+            $hasLiveVideo = (bool)($settings['has_live_video'] ?? false);
+            if (!$hasLiveVideo) {
+                $row['liveid'] = null;
+            }
+
             if (isset($settings['use_live_video'])) {
-                $row['use_live_video'] = (bool)$settings['use_live_video'];
-            } elseif (!empty($row['liveid'])) {
-                // Auto rule: need still dimensions.
-                $dim = $this->memoriesRepository->loadStillDimensions((int)$row['file_id']);
-                $stillIsLandscape = $dim && (int)$dim['w'] >= (int)$dim['h'];
-                $row['use_live_video'] = ($stillIsLandscape === $outputIsLandscape);
+                $row['use_live_video'] = $hasLiveVideo && (bool)$settings['use_live_video'];
+            } elseif ($hasLiveVideo) {
+                $row['use_live_video'] = true;
             } else {
                 $row['use_live_video'] = false;
             }
@@ -1088,24 +1081,6 @@ class VideoRenderingService {
                     $movFileId = $this->memoriesRepository->findLiveVideoFileId($fileId);
                     if ($movFileId !== null) {
                         $fileId = $movFileId;
-                        
-                        // Probe the live clip duration; very short clips (<1s) are effectively
-                        // invisible once transitions are applied, so fall back to the still.
-                        $movFiles = $userFolder->getById($movFileId);
-                        if (!empty($movFiles)) {
-                            $movLocalPath = $this->getLocalPath($movFiles[0]);
-                            if (file_exists($movLocalPath)) {
-                                $liveDuration = $this->probeVideoDurationSeconds($movLocalPath);
-                                if ($liveDuration !== null && $liveDuration < 1.0) {
-                                    $this->logger->info(
-                                        'Reel: excluding short live clip {d}s < 1.0s for file {id}, using still',
-                                        ['id' => $row['file_id'], 'd' => round($liveDuration, 2)]
-                                    );
-                                    $fileId = (int)$row['file_id'];
-                                    $useLive = false;
-                                }
-                            }
-                        }
                     } else {
                         $this->logger->info('Reel: .mov not found for live photo {id}, using still', ['id' => $row['file_id']]);
                         $useLive = false;
@@ -1378,10 +1353,6 @@ class VideoRenderingService {
         return $duration > 0.0 ? $duration : null;
     }
 
-    /**
-     * Probe a live MOV clip's duration by file ID.
-     * Used during detection to exclude very short clips that would be invisible in the timeline.
-     */
     private function buildPhotoMotionSubtle(
         int $fileId,
         array $faces,

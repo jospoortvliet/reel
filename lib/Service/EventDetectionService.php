@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\Reel\Service;
 
+use OCP\Files\IRootFolder;
 use OCP\IDBConnection;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use Psr\Log\LoggerInterface;
@@ -31,16 +32,21 @@ class EventDetectionService {
     private const MIN_EVENT_ITEMS = 6;
     private const PLACE_CHANGE_MIN_GAP_SECONDS = 30 * 60; // 30 minutes
     private const PLACE_DOMINANCE_THRESHOLD = 0.6;
+    private const MIN_LIVE_CLIP_SECONDS = 1.2;
 
     // OSM admin_level for city-level granularity (8 = city, 6 = county, 4 = region)
     // We prefer the most specific level available
     private const PREFERRED_ADMIN_LEVELS = [8, 7, 6, 5, 4];
+
+    /** @var (callable(string):void)|null */
+    private $debugCallback = null;
 
     public function __construct(
         private IDBConnection        $db,
         private LoggerInterface      $logger,
         private DuplicateFilterService $duplicateFilter,
         private MemoriesRepository   $memoriesRepository,
+        private IRootFolder          $rootFolder,
     ) {}
 
     /**
@@ -50,7 +56,8 @@ class EventDetectionService {
      * Incremental mode keeps event IDs and user customisations where possible.
      * Rebuild mode drops and recreates all events/media for the user.
      */
-    public function detectForUser(string $userId, bool $rebuild = false): int {
+    public function detectForUser(string $userId, bool $rebuild = false, ?callable $onDebug = null): int {
+        $this->debugCallback = $onDebug;
         $this->logger->info('Reel: starting event detection for user {user}', ['user' => $userId]);
 
         // 1. Load all media for this user from Memories, sorted by time
@@ -74,15 +81,19 @@ class EventDetectionService {
             'user'  => $userId,
         ]);
 
-        if ($rebuild) {
-            $this->logger->info('Reel: running detection in full rebuild mode for user {user}', ['user' => $userId]);
-            $this->persistClustersRebuild($userId, $clusters);
-        } else {
-            // 3. Incrementally sync clusters into reel_events + reel_event_media
-            $this->persistClustersIncremental($userId, $clusters);
-        }
+        try {
+            if ($rebuild) {
+                $this->logger->info('Reel: running detection in full rebuild mode for user {user}', ['user' => $userId]);
+                $this->persistClustersRebuild($userId, $clusters);
+            } else {
+                // 3. Incrementally sync clusters into reel_events + reel_event_media
+                $this->persistClustersIncremental($userId, $clusters);
+            }
 
-        return count($clusters);
+            return count($clusters);
+        } finally {
+            $this->debugCallback = null;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -96,6 +107,227 @@ class EventDetectionService {
      */
     private function loadMediaForUser(string $userId): array {
         return $this->memoriesRepository->loadMediaForUser($userId);
+    }
+
+    private function buildMediaSettings(string $userId, array $item, array $existingSettings = []): array {
+        $settings = $existingSettings;
+        $fileId = (int)$item['fileid'];
+        $isVideo = !empty($item['isvideo']);
+        $hasLiveVideo = false;
+
+        if (!$isVideo && !empty($item['liveid'])) {
+            $duration = $this->probeLiveVideoDurationSeconds($userId, $fileId);
+            $hasLiveVideo = $duration !== null && $duration >= self::MIN_LIVE_CLIP_SECONDS;
+
+            if ($duration !== null && !$hasLiveVideo) {
+                $this->logger->info(
+                    'Reel: storing live photo as still only (file {id}, {d}s < {min}s)',
+                    ['id' => $fileId, 'd' => round($duration, 2), 'min' => self::MIN_LIVE_CLIP_SECONDS]
+                );
+            }
+        }
+
+        if ($isVideo) {
+            $sourceDuration = max(0.0, (float)($item['video_duration'] ?? 0.0));
+            [$defaultStart, $defaultLength] = $this->defaultVideoWindow($sourceDuration);
+            $hasLiveVideo = false;
+            if (!array_key_exists('video_start', $settings)) {
+                $settings['video_start'] = $defaultStart;
+            }
+            if (!array_key_exists('video_length', $settings)) {
+                $settings['video_length'] = $defaultLength;
+            }
+        } else {
+            unset($settings['video_start'], $settings['video_length']);
+        }
+
+        $settings['has_live_video'] = $hasLiveVideo;
+        if (!$hasLiveVideo) {
+            $settings['use_live_video'] = false;
+        } elseif (!array_key_exists('use_live_video', $settings)) {
+            $settings['use_live_video'] = true;
+        }
+
+        return $settings;
+    }
+
+    private function defaultVideoWindow(float $sourceDuration): array {
+        if ($sourceDuration <= 0.0) {
+            return [0.0, 8.0];
+        }
+
+        $length = min(8.0, max(0.6, $sourceDuration));
+        $start = $sourceDuration > ($length + 0.05)
+            ? max(0.0, ($sourceDuration - $length) / 2.0)
+            : 0.0;
+
+        return [$start, $length];
+    }
+
+    private function probeLiveVideoDurationSeconds(string $userId, int $stillFileId): ?float {
+    $liveVideoFileId = $this->memoriesRepository->findLiveVideoFileId($stillFileId);
+    if ($liveVideoFileId === null) {
+        $this->logger->debug('Reel: no paired .mov found for still {id}', ['id' => $stillFileId]);
+        return null;
+    }
+
+    try {
+        $userFolder = $this->rootFolder->getUserFolder($userId);
+        $nodes = $userFolder->getById($liveVideoFileId);
+        if (empty($nodes)) {
+            $this->logger->warning('Reel: live video file {id} not found in user folder', ['id' => $liveVideoFileId]);
+            return null;
+        }
+
+        $node = $nodes[0];
+        $storage = $node->getStorage();
+
+        if (!$storage->isLocal()) {
+            // S3/remote storage: getLocalFile() returns null so ffprobe can't be used.
+            // TODO: implement fopen() download-to-temp fallback for non-local storage.
+            // Live photo .mov files are typically 2-8MB so a full download is acceptable.
+            $this->logger->debug(
+                'Reel: skipping ffprobe for live video {id} on non-local storage ({class}), using default duration',
+                ['id' => $liveVideoFileId, 'class' => get_class($storage)]
+            );
+            return null;
+        }
+
+        $localFile = $storage->getLocalFile($node->getInternalPath());
+        if ($localFile === null) {
+            $this->logger->warning(
+                'Reel: getLocalFile() returned null for {id} despite isLocal() being true',
+                ['id' => $liveVideoFileId]
+            );
+            return null;
+        }
+        if (!file_exists($localFile)) {
+            $this->logger->warning('Reel: local file {path} does not exist on disk', ['path' => $localFile]);
+            return null;
+        }
+
+        $duration = $this->probeDurationWithFfprobe($localFile);
+        if ($duration === null) {
+            $this->logger->warning('Reel: ffprobe returned no usable duration for live video {id}', ['id' => $liveVideoFileId]);
+        }
+        return $duration;
+
+    } catch (\Throwable $e) {
+        $this->logger->error('Reel: unexpected error probing duration for still {id}: {msg}', [
+            'id'        => $stillFileId,
+            'msg'       => $e->getMessage(),
+            'exception' => $e,
+        ]);
+        return null;
+    }
+}
+
+private function probeDurationWithFfprobe(string $localPath): ?float {
+    $cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        $localPath,
+    ];
+
+    $process = proc_open(
+        $cmd,
+        [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes
+    );
+
+    if (!is_resource($process)) {
+        $this->logger->error('Reel: failed to launch ffprobe for {path}', ['path' => $localPath]);
+        return null;
+    }
+
+    fclose($pipes[0]);
+
+    // Read stdout/stderr with a timeout to avoid hanging on corrupt files
+    $stdout = '';
+    $stderr = '';
+    $timeout = 10;
+    $start = time();
+
+    while (!feof($pipes[1]) || !feof($pipes[2])) {
+        if (time() - $start > $timeout) {
+            $this->logger->error('Reel: ffprobe timed out after {s}s for {path}', [
+                'path' => $localPath,
+                's'    => $timeout,
+            ]);
+            proc_terminate($process);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+            return null;
+        }
+
+        $read = [$pipes[1], $pipes[2]];
+        $write = $except = [];
+        if (stream_select($read, $write, $except, 1) === false) {
+            break;
+        }
+
+        foreach ($read as $pipe) {
+            if ($pipe === $pipes[1]) {
+                $stdout .= fread($pipe, 4096);
+            } else {
+                $stderr .= fread($pipe, 4096);
+            }
+        }
+    }
+
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exitCode = proc_close($process);
+
+    if ($exitCode !== 0) {
+        $this->logger->warning('Reel: ffprobe exited {code} for {path}: {stderr}', [
+            'path'   => $localPath,
+            'code'   => $exitCode,
+            'stderr' => trim($stderr),
+        ]);
+        return null;
+    }
+
+    if ($stdout === false || !is_numeric(trim($stdout))) {
+        $this->logger->warning('Reel: ffprobe returned non-numeric output "{val}" for {path}', [
+            'path' => $localPath,
+            'val'  => trim((string)$stdout),
+        ]);
+        return null;
+    }
+
+    $duration = (float)trim($stdout);
+    return $duration > 0.0 ? $duration : null;
+}   
+
+    private function emitMediaDebugLine(int $eventId, int $fileId, array $item, array $settings): void {
+        if ($this->debugCallback === null) {
+            return;
+        }
+
+        $type = !empty($item['isvideo'])
+            ? 'video'
+            : (!empty($item['liveid']) ? 'photo_live_memories' : 'photo');
+        $path = (string)($item['path'] ?? '');
+
+        ($this->debugCallback)(sprintf(
+            'event=%d file_id=%d path="%s" type=%s has_live_video=%s use_live_video=%s video_start=%s video_length=%s',
+            $eventId,
+            $fileId,
+            $path,
+            $type,
+            (($settings['has_live_video'] ?? false) ? 'true' : 'false'),
+            (($settings['use_live_video'] ?? false) ? 'true' : 'false'),
+            array_key_exists('video_start', $settings) ? (string)$settings['video_start'] : 'null',
+            array_key_exists('video_length', $settings) ? (string)$settings['video_length'] : 'null',
+        ));
     }
 
     /**
@@ -137,7 +369,6 @@ class EventDetectionService {
                 ];
             }
         }
-
         // Flatten to fileid → name
         return array_map(fn($v) => $v['name'], $placeMap);
     }
@@ -282,7 +513,7 @@ class EventDetectionService {
             $eventId = $this->findBestExistingEventMatch($cluster, $clusterFileIds, $existing, $matchedEventIds);
             if ($eventId !== null) {
                 $this->updateEventRow($eventId, $cluster);
-                $this->syncEventMedia($eventId, $userId, $clusterFileIds);
+                $this->syncEventMedia($eventId, $userId, $cluster['media']);
                 $matchedEventIds[$eventId] = true;
                 continue;
             }
@@ -423,9 +654,9 @@ class EventDetectionService {
             ->executeStatement();
     }
 
-    private function syncEventMedia(int $eventId, string $userId, array $clusterFileIds): void {
+    private function syncEventMedia(int $eventId, string $userId, array $clusterMedia): void {
         $qb = $this->db->getQueryBuilder();
-        $qb->select('id', 'file_id')
+        $qb->select('id', 'file_id', 'edit_settings')
             ->from('reel_event_media')
             ->where($qb->expr()->eq('event_id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
             ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
@@ -433,7 +664,7 @@ class EventDetectionService {
         $existingRows = $qb->executeQuery()->fetchAll();
         $existingByFileId = [];
         foreach ($existingRows as $row) {
-            $existingByFileId[(int)$row['file_id']] = (int)$row['id'];
+            $existingByFileId[(int)$row['file_id']] = $row;
         }
 
         $seen      = [];
@@ -441,20 +672,30 @@ class EventDetectionService {
 
         $this->db->beginTransaction();
         try {
-            foreach ($clusterFileIds as $order => $fileId) {
-                $fileId = (int)$fileId;
+            foreach ($clusterMedia as $order => $item) {
+                $fileId = (int)$item['fileid'];
                 $seen[$fileId] = true;
 
                 if (isset($existingByFileId[$fileId])) {
+                    $existing = $existingByFileId[$fileId];
+                    $settings = !empty($existing['edit_settings'])
+                        ? (json_decode((string)$existing['edit_settings'], true) ?? [])
+                        : [];
+                    $settings = $this->buildMediaSettings($userId, $item, $settings);
+                    $this->emitMediaDebugLine($eventId, $fileId, $item, $settings);
+
                     $update = $this->db->getQueryBuilder();
                     $update->update('reel_event_media')
                         ->set('sort_order', $update->createNamedParameter($order, IQueryBuilder::PARAM_INT))
-                        ->where($update->expr()->eq('id', $update->createNamedParameter($existingByFileId[$fileId], IQueryBuilder::PARAM_INT)))
+                        ->set('edit_settings', $update->createNamedParameter(json_encode($settings)))
+                        ->where($update->expr()->eq('id', $update->createNamedParameter((int)$existing['id'], IQueryBuilder::PARAM_INT)))
                         ->executeStatement();
                     continue;
                 }
 
                 $insert = $this->db->getQueryBuilder();
+                $settings = $this->buildMediaSettings($userId, $item);
+                $this->emitMediaDebugLine($eventId, $fileId, $item, $settings);
                 $insert->insert('reel_event_media')
                     ->values([
                         'event_id' => $insert->createNamedParameter($eventId, IQueryBuilder::PARAM_INT),
@@ -462,6 +703,7 @@ class EventDetectionService {
                         'file_id' => $insert->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
                         'included' => $insert->createNamedParameter(1, IQueryBuilder::PARAM_INT),
                         'sort_order' => $insert->createNamedParameter($order, IQueryBuilder::PARAM_INT),
+                        'edit_settings' => $insert->createNamedParameter(json_encode($settings)),
                     ])
                     ->executeStatement();
             }
@@ -508,6 +750,8 @@ class EventDetectionService {
         $this->db->beginTransaction();
         try {
             foreach ($cluster['media'] as $order => $item) {
+                $settings = $this->buildMediaSettings($userId, $item);
+                $this->emitMediaDebugLine($eventId, (int)$item['fileid'], $item, $settings);
                 $mqb = $this->db->getQueryBuilder();
                 $mqb->insert('reel_event_media')
                     ->values([
@@ -516,6 +760,7 @@ class EventDetectionService {
                         'file_id' => $mqb->createNamedParameter((int)$item['fileid'], IQueryBuilder::PARAM_INT),
                         'included' => $mqb->createNamedParameter(1, IQueryBuilder::PARAM_INT),
                         'sort_order' => $mqb->createNamedParameter($order, IQueryBuilder::PARAM_INT),
+                        'edit_settings' => $mqb->createNamedParameter(json_encode($settings)),
                     ])
                     ->executeStatement();
             }

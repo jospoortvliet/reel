@@ -30,6 +30,7 @@ class MemoriesRepository {
                 'm.lat',
                 'm.lon',
                 'm.video_duration',
+            'fc.path',
             )
             ->from('memories', 'm')
             ->innerJoin('m', 'filecache', 'fc', $qb->expr()->eq('m.fileid', 'fc.fileid'))
