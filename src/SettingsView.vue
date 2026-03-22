@@ -71,6 +71,21 @@
 			</section>
 
 			<section :class="$style.section">
+				<h3>{{ t('reel', 'Automation') }}</h3>
+				<p :class="$style.description">
+					{{ t('reel', 'Optionally generate videos automatically after nightly event detection. Reel queues at most 3 new videos per run.') }}
+				</p>
+				<div :class="$style.field">
+					<label :class="$style.checkboxRow">
+						<input
+							v-model="form.autoCreateVideos"
+							type="checkbox" />
+						<span>{{ t('reel', 'Automatically create videos in nightly background job') }}</span>
+					</label>
+				</div>
+			</section>
+
+			<section :class="$style.section">
 				<h3>{{ t('reel', 'Duplicate Detection') }}</h3>
 				<p :class="$style.description">
 					{{ t('reel', 'When generating a highlight reel, Reel automatically skips near-duplicate photos taken in quick succession. Adjust these settings to tune how aggressively duplicates are filtered.') }}
@@ -156,6 +171,7 @@ const form = ref({
 	similarity:  16,
 	orientation: 'landscape_16_9' as string,
 	customMusicFolder: '',
+	autoCreateVideos: false,
 })
 
 onMounted(async () => {
@@ -167,6 +183,7 @@ onMounted(async () => {
 		form.value.similarity  = data.similarity_threshold
 		form.value.orientation = data.output_orientation ?? 'landscape_16_9'
 		form.value.customMusicFolder = data.custom_music_folder ?? ''
+		form.value.autoCreateVideos = !!data.auto_create_videos
 	} catch (e) {
 		showError(t('reel', 'Failed to load settings'))
 	} finally {
@@ -205,6 +222,7 @@ async function save() {
 			similarity_threshold: form.value.similarity,
 			output_orientation:   form.value.orientation,
 			custom_music_folder:  form.value.customMusicFolder,
+			auto_create_videos:   form.value.autoCreateVideos,
 		}, { params: { format: 'json' } })
 		saved.value = true
 		setTimeout(() => { saved.value = false }, 3000)
@@ -248,6 +266,13 @@ async function save() {
 	display: block;
 	font-weight: 500;
 	margin-bottom: 6px;
+}
+
+.checkboxRow {
+	display: flex !important;
+	align-items: center;
+	gap: 10px;
+	font-weight: 500;
 }
 
 .inputRow {

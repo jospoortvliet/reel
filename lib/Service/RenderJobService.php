@@ -19,7 +19,7 @@ class RenderJobService {
     /**
      * Create a new render job row, queue the background job, return the job row.
      */
-    public function enqueue(int $eventId, string $userId): array {
+    public function enqueue(int $eventId, string $userId, bool $notifyOnDone = false): array {
         $qb = $this->db->getQueryBuilder();
         $now = time();
 
@@ -42,6 +42,7 @@ class RenderJobService {
             'event_id' => $eventId,
             'user_id'  => $userId,
             'job_id'   => (int)$jobId,
+            'notify_on_done' => $notifyOnDone,
         ]);
 
         return $this->getJob((int)$jobId, $userId);

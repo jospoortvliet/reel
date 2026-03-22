@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace OCA\Reel\BackgroundJob;
 
+use OCA\Reel\AppInfo\Application;
 use OCA\Reel\Service\VideoRenderingService;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\QueuedJob;
 use OCP\IDBConnection;
 use OCP\DB\QueryBuilder\IQueryBuilder;
+use OCP\Notification\IManager;
+use OCP\IURLGenerator;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -26,6 +29,8 @@ class RenderJob extends QueuedJob {
         ITimeFactory                   $time,
         private VideoRenderingService  $renderingService,
         private IDBConnection          $db,
+        private IManager               $notificationManager,
+        private IURLGenerator          $urlGenerator,
         private LoggerInterface        $logger,
     ) {
         parent::__construct($time);
@@ -38,6 +43,7 @@ class RenderJob extends QueuedJob {
         $eventId = (int)$argument['event_id'];
         $userId  = (string)$argument['user_id'];
         $jobId   = (int)$argument['job_id'];
+        $notifyOnDone = !empty($argument['notify_on_done']);
 
         $this->logger->info('Reel: RenderJob starting for event {event}, job {job}', [
             'event' => $eventId,
@@ -63,6 +69,10 @@ class RenderJob extends QueuedJob {
             );
             $this->updateJobStatus($jobId, 'done', 100);
             $this->updateEventVideoFileId($eventId, $userId, $fileId);
+
+            if ($notifyOnDone) {
+                $this->sendVideoReadyNotification($eventId, $userId);
+            }
 
             $this->logger->info('Reel: RenderJob complete for event {event}, file {file}', [
                 'event' => $eventId,
@@ -100,5 +110,31 @@ class RenderJob extends QueuedJob {
 
         $qb->where($qb->expr()->eq('id', $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT)))
            ->executeStatement();
+    }
+
+    private function sendVideoReadyNotification(int $eventId, string $userId): void {
+        $eventTitle = $this->loadEventTitle($eventId, $userId) ?? ('Event #' . $eventId);
+
+        $notification = $this->notificationManager->createNotification();
+        $notification->setApp(Application::APP_ID)
+            ->setUser($userId)
+            ->setDateTime(new \DateTime())
+            ->setObject('reel_event', (string)$eventId)
+            ->setSubject('video_ready', ['event_title' => $eventTitle])
+            ->setLink($this->urlGenerator->linkToRouteAbsolute('reel.page.event', ['id' => $eventId]));
+
+        $this->notificationManager->notify($notification);
+    }
+
+    private function loadEventTitle(int $eventId, string $userId): ?string {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select('title')
+            ->from('reel_events')
+            ->where($qb->expr()->eq('id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+            ->setMaxResults(1);
+
+        $title = $qb->executeQuery()->fetchOne();
+        return $title !== false ? (string)$title : null;
     }
 }

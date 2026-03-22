@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Video closing: 3-second fade-to-black outro applied to all reels; last still image is extended to a minimum of 4 s so the fade has room; timeline is freeze-frame extended when needed, with at least 1 s of unobstructed viewing before the fade begins.
 - Music: new user setting for a custom music folder; Reel scans it recursively for supported audio files and exposes those tracks in the soundtrack picker.
 - Event detection: new Tier A utility-photo prefilter (`UtilityFilterService`) to conservatively exclude likely receipts/menus/screens/doc photos before downstream media selection.
+- Events UI: inline event title editing in event detail view (saved via API and persisted until the next detection rebuild updates event data).
+- Events UI/API: manual add-media flow via file picker (multi-select) to append indexed Memories files to an event.
+- Automation: optional nightly auto-create mode that queues up to 3 newest renderable top-level events per user.
+- Notifications: Reel notifier for `video_ready` events, including a direct link to the rendered event page.
 
 ### Changed
 

@@ -19,6 +19,7 @@ class SettingsController extends OCSController {
     private const DEFAULT_SIMILARITY_THRESHOLD = 16;
     private const DEFAULT_BURST_GAP_SECONDS    = 5;
     private const DEFAULT_OUTPUT_ORIENTATION   = 'landscape_16_9';
+    private const DEFAULT_AUTO_CREATE_VIDEOS   = '0';
 
     public function __construct(
         string          $appName,
@@ -62,6 +63,12 @@ class SettingsController extends OCSController {
                 self::DEFAULT_OUTPUT_ORIENTATION,
             ),
             'custom_music_folder' => $this->musicService->getCustomMusicFolderPath($this->userId),
+            'auto_create_videos' => $this->config->getUserValue(
+                $this->userId,
+                Application::APP_ID,
+                'auto_create_videos',
+                self::DEFAULT_AUTO_CREATE_VIDEOS,
+            ) === '1',
         ]);
     }
 
@@ -72,6 +79,7 @@ class SettingsController extends OCSController {
         ?int    $burst_gap_seconds    = null,
         ?string $output_orientation   = null,
         ?string $custom_music_folder  = null,
+        ?bool   $auto_create_videos   = null,
     ): DataResponse {
         if ($guard = $this->requireUserId()) return $guard;
 
@@ -113,6 +121,15 @@ class SettingsController extends OCSController {
             } catch (\Throwable $e) {
                 return new DataResponse(['error' => 'Invalid custom music folder'], 400);
             }
+        }
+
+        if ($auto_create_videos !== null) {
+            $this->config->setUserValue(
+                $this->userId,
+                Application::APP_ID,
+                'auto_create_videos',
+                $auto_create_videos ? '1' : '0',
+            );
         }
 
         return $this->getSettings();

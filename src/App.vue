@@ -11,7 +11,7 @@ import NcEmptyContent from '@nextcloud/vue/components/NcEmptyContent'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import NcButton from '@nextcloud/vue/components/NcButton'
 import NcSelect from '@nextcloud/vue/components/NcSelect'
-import { showError, showSuccess } from '@nextcloud/dialogs'
+import { getFilePickerBuilder, showError, showSuccess } from '@nextcloud/dialogs'
 import axios from '@nextcloud/axios'
 import { generateOcsUrl, generateUrl } from '@nextcloud/router'
 
@@ -103,6 +103,10 @@ const showClipEditor = ref(false)
 const clipEditorItem = ref<MediaItem | null>(null)
 const clipStart = ref(0)
 const clipLength = ref(2)
+const isEditingTitle = ref(false)
+const titleDraft = ref('')
+const savingTitle = ref(false)
+const addingMedia = ref(false)
 let   pollTimer     = null as ReturnType<typeof setInterval> | null
 
 const currentTheme = computed(() => {
@@ -183,6 +187,94 @@ async function loadEventById(id: number) {
 
 async function openSubEvent(id: number) {
 	await router.push({ name: 'event', params: { id } })
+}
+
+function startTitleEdit() {
+	if (!selectedEvent.value) return
+	titleDraft.value = selectedEvent.value.title ?? ''
+	isEditingTitle.value = true
+}
+
+function cancelTitleEdit() {
+	isEditingTitle.value = false
+	titleDraft.value = ''
+}
+
+async function saveTitleEdit() {
+	if (!selectedEvent.value || savingTitle.value) return
+	const nextTitle = titleDraft.value.trim()
+	if (!nextTitle) {
+		showError(t('reel', 'Title cannot be empty'))
+		return
+	}
+
+	const eventId = selectedEvent.value.id
+	savingTitle.value = true
+	try {
+		const url = generateOcsUrl(`/apps/reel/api/v1/events/${eventId}`)
+		await axios.put(url, { title: nextTitle }, { params: { format: 'json' } })
+		selectedEvent.value.title = nextTitle
+		const row = events.value.find(e => e.id === eventId)
+		if (row) {
+			row.title = nextTitle
+		}
+		isEditingTitle.value = false
+		showSuccess(t('reel', 'Event title updated'))
+	} catch {
+		showError(t('reel', 'Failed to update event title'))
+	} finally {
+		savingTitle.value = false
+	}
+}
+
+async function pickAndAddMedia() {
+	if (!selectedEvent.value || addingMedia.value) return
+
+	// Open the picker *before* entering loading state so a cancel/dismiss
+	// never leaves the button stuck in "Adding…" mode.
+	let paths: string[] = []
+	try {
+		const picker = getFilePickerBuilder(t('reel', 'Choose files to add'))
+			.allowDirectories(false)
+			.setMultiSelect(true)
+			.build()
+
+		const selected = await picker.pick()
+		paths = Array.isArray(selected)
+			? selected.filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+			: (typeof selected === 'string' && selected.trim() !== '' ? [selected] : [])
+	} catch (error: any) {
+		const msg = String(error?.message ?? '')
+		if (!msg.toLowerCase().includes('cancel')) {
+			showError(t('reel', 'Failed to open file picker'))
+		}
+		return
+	}
+
+	if (paths.length === 0) return
+
+	// Now we have real paths — enter the loading state only for the API call.
+	addingMedia.value = true
+	try {
+		const eventId = selectedEvent.value.id
+		const url = generateOcsUrl(`/apps/reel/api/v1/events/${eventId}/media/add`)
+		const response = await axios.post(url, { paths }, { params: { format: 'json' } })
+		const data = response.data?.ocs?.data ?? response.data ?? {}
+		const added = Number(data.added ?? 0)
+
+		await loadEventById(eventId)
+		await loadEvents()
+
+		if (added > 0) {
+			showSuccess(t('reel', 'Added {n} item(s) to this event', { n: String(added) }))
+		} else {
+			showError(t('reel', 'No new files were added (already present or unsupported)'))
+		}
+	} catch {
+		showError(t('reel', 'Failed to add media to event'))
+	} finally {
+		addingMedia.value = false
+	}
 }
 
 // -------------------------------------------------------------------------
@@ -499,9 +591,13 @@ onMounted(async () => {
 // React to route changes (back/forward, programmatic navigation)
 watch(() => route.params.id, async (id) => {
 	if (id) {
+		isEditingTitle.value = false
+		titleDraft.value = ''
 		await loadEventById(Number(id))
 	} else {
 		stopPolling()
+		isEditingTitle.value = false
+		titleDraft.value = ''
 		selectedEvent.value = null
 	}
 })
@@ -581,7 +677,34 @@ watch(() => route.params.id, async (id) => {
 
 				<div :class="$style.detailHeader">
 					<div>
-						<h2>{{ selectedEvent.title }}</h2>
+						<div :class="$style.titleRow">
+							<template v-if="!isEditingTitle">
+								<h2 :class="$style.titleText">{{ selectedEvent.title }}</h2>
+								<button
+									:class="$style.renameBtn"
+									:title="t('reel', 'Rename event')"
+									@click="startTitleEdit">
+									<span :class="[$style.ncIcon, 'icon-rename']" aria-hidden="true" />
+								</button>
+							</template>
+							<template v-else>
+								<input
+									v-model.trim="titleDraft"
+									:class="$style.titleInput"
+									type="text"
+									:placeholder="t('reel', 'Event title')"
+									@keydown.enter.prevent="saveTitleEdit"
+									@keydown.esc.prevent="cancelTitleEdit" />
+								<div :class="$style.titleActions">
+									<NcButton :disabled="savingTitle" @click="cancelTitleEdit">
+										{{ t('reel', 'Cancel') }}
+									</NcButton>
+									<NcButton type="primary" :disabled="savingTitle || !titleDraft.trim()" @click="saveTitleEdit">
+										{{ savingTitle ? t('reel', 'Saving…') : t('reel', 'Save') }}
+									</NcButton>
+								</div>
+							</template>
+						</div>
 						<p>{{ formatDateRange(selectedEvent.date_start, selectedEvent.date_end) }}</p>
 						<p>{{ includedCount }} {{ t('reel', 'of') }} {{ selectedEvent.media.length }} {{ t('reel', 'items included') }}</p>
 						<div :class="$style.themeRow">
@@ -600,6 +723,11 @@ watch(() => route.params.id, async (id) => {
 						</div>
 					</div>
 					<div :class="$style.actions">
+						<NcButton
+							:disabled="addingMedia"
+							@click="pickAndAddMedia">
+							{{ addingMedia ? t('reel', 'Adding…') : t('reel', 'Add media') }}
+						</NcButton>
 						<NcButton
 							type="primary"
 							:disabled="isRendering || includedCount < 2"
@@ -964,6 +1092,59 @@ watch(() => route.params.id, async (id) => {
 .detailHeader h2 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
 .detailHeader p { color: var(--color-text-maxcontrast); font-size: 0.875rem; }
 .actions { flex-shrink: 0; }
+
+.titleRow {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: nowrap;
+}
+
+.titleText {
+	margin: 0;
+	font-size: 1.5rem;
+	font-weight: 600;
+	margin-bottom: 0 !important;
+}
+
+.renameBtn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	border: none;
+	background: transparent;
+	cursor: pointer;
+	color: var(--color-text-maxcontrast);
+	transition: background 0.15s, color 0.15s;
+	flex-shrink: 0;
+	padding: 0;
+}
+
+.renameBtn:hover,
+.renameBtn:focus-visible {
+	background: var(--color-background-hover);
+	color: var(--color-main-text);
+	outline: none;
+}
+
+.titleActions {
+	display: flex;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.titleInput {
+	min-width: 220px;
+	max-width: 420px;
+	padding: 8px 10px;
+	border: 1px solid var(--color-border-dark);
+	border-radius: var(--border-radius-element);
+	background: var(--color-main-background);
+	color: var(--color-main-text);
+}
 
 .themeRow {
 	margin-top: 10px;

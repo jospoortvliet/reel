@@ -213,6 +213,116 @@ class ApiController extends OCSController {
         return new DataResponse(['success' => true]);
     }
 
+    #[NoAdminRequired]
+    #[ApiRoute(verb: 'POST', url: '/api/v1/events/{id}/media/add')]
+    public function addMedia(int $id, array|string|null $paths = null): DataResponse {
+        if ($guard = $this->requireUserId()) return $guard;
+
+        $event = $this->fetchEvent($id);
+        if (!$event) {
+            return new DataResponse(['error' => 'Not found'], 404);
+        }
+
+        $pathList = [];
+        if (is_string($paths) && $paths !== '') {
+            $pathList[] = $paths;
+        } elseif (is_array($paths)) {
+            foreach ($paths as $path) {
+                if (is_string($path) && trim($path) !== '') {
+                    $pathList[] = $path;
+                }
+            }
+        }
+
+        if (empty($pathList)) {
+            return new DataResponse(['error' => 'No paths provided'], 400);
+        }
+
+        $userFolder = $this->rootFolder->getUserFolder($this->userId);
+
+        $existingQb = $this->db->getQueryBuilder();
+        $existingQb->select('file_id')
+            ->from('reel_event_media')
+            ->where($existingQb->expr()->eq('event_id', $existingQb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+            ->andWhere($existingQb->expr()->eq('user_id', $existingQb->createNamedParameter($this->userId)));
+        $existingRows = $existingQb->executeQuery()->fetchAll();
+        $existingSet = [];
+        foreach ($existingRows as $row) {
+            $existingSet[(int)$row['file_id']] = true;
+        }
+
+        $orderQb = $this->db->getQueryBuilder();
+        $orderQb->selectAlias($orderQb->createFunction('MAX(sort_order)'), 'max_order')
+            ->from('reel_event_media')
+            ->where($orderQb->expr()->eq('event_id', $orderQb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+            ->andWhere($orderQb->expr()->eq('user_id', $orderQb->createNamedParameter($this->userId)));
+        $maxOrder = (int)($orderQb->executeQuery()->fetchOne() ?: 0);
+
+        $added = 0;
+        $already = 0;
+        $skipped = 0;
+
+        foreach ($pathList as $pathRaw) {
+            $path = '/' . ltrim(trim($pathRaw), '/');
+            try {
+                $node = $userFolder->get($path);
+            } catch (\Throwable $e) {
+                $skipped++;
+                continue;
+            }
+
+            if (!method_exists($node, 'getId')) {
+                $skipped++;
+                continue;
+            }
+
+            $fileId = (int)$node->getId();
+            if ($fileId <= 0) {
+                $skipped++;
+                continue;
+            }
+
+            if (isset($existingSet[$fileId])) {
+                $already++;
+                continue;
+            }
+
+            // Only add media that Memories has indexed.
+            $memQb = $this->db->getQueryBuilder();
+            $memQb->select('fileid')
+                ->from('memories')
+                ->where($memQb->expr()->eq('fileid', $memQb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+                ->setMaxResults(1);
+            if ($memQb->executeQuery()->fetchOne() === false) {
+                $skipped++;
+                continue;
+            }
+
+            $maxOrder++;
+            $insert = $this->db->getQueryBuilder();
+            $insert->insert('reel_event_media')
+                ->values([
+                    'event_id' => $insert->createNamedParameter($id, IQueryBuilder::PARAM_INT),
+                    'user_id' => $insert->createNamedParameter($this->userId),
+                    'file_id' => $insert->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+                    'included' => $insert->createNamedParameter(1, IQueryBuilder::PARAM_INT),
+                    'sort_order' => $insert->createNamedParameter($maxOrder, IQueryBuilder::PARAM_INT),
+                    'edit_settings' => $insert->createNamedParameter(null, IQueryBuilder::PARAM_NULL),
+                ])
+                ->executeStatement();
+
+            $existingSet[$fileId] = true;
+            $added++;
+        }
+
+        return new DataResponse([
+            'success' => true,
+            'added' => $added,
+            'already_present' => $already,
+            'skipped' => $skipped,
+        ]);
+    }
+
     // -------------------------------------------------------------------------
     // Render
     // -------------------------------------------------------------------------

@@ -4,10 +4,15 @@ declare(strict_types=1);
 
 namespace OCA\Reel\BackgroundJob;
 
+use OCA\Reel\AppInfo\Application;
 use OCA\Reel\Service\EventDetectionService;
 use OCA\Reel\Service\MusicService;
+use OCA\Reel\Service\RenderJobService;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\TimedJob;
+use OCP\IConfig;
+use OCP\IDBConnection;
+use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IUserManager;
 use Psr\Log\LoggerInterface;
 
@@ -25,6 +30,9 @@ class DetectEventsJob extends TimedJob {
         private EventDetectionService $detectionService,
         private IUserManager          $userManager,
         private MusicService          $musicService,
+        private RenderJobService      $renderJobService,
+        private IDBConnection         $db,
+        private IConfig               $config,
         private LoggerInterface       $logger,
     ) {
         parent::__construct($time);
@@ -50,6 +58,8 @@ class DetectEventsJob extends TimedJob {
                     'count' => $count,
                     'user'  => $uid,
                 ]);
+
+                $this->maybeAutoCreateVideos($uid);
             } catch (\Throwable $e) {
                 $this->logger->error('Reel: event detection failed for user {user}: {msg}', [
                     'user' => $uid,
@@ -70,5 +80,58 @@ class DetectEventsJob extends TimedJob {
         });
 
         $this->logger->info('Reel: DetectEventsJob complete');
+    }
+
+    private function maybeAutoCreateVideos(string $userId): void {
+        $enabled = $this->config->getUserValue($userId, Application::APP_ID, 'auto_create_videos', '0') === '1';
+        if (!$enabled) {
+            return;
+        }
+
+        $candidates = $this->loadLatestRenderableEvents($userId, 3);
+        $queued = 0;
+
+        foreach ($candidates as $event) {
+            $eventId = (int)$event['id'];
+            if ($this->hasActiveRenderJob($eventId, $userId)) {
+                continue;
+            }
+
+            $this->renderJobService->enqueue($eventId, $userId, true);
+            $queued++;
+        }
+
+        if ($queued > 0) {
+            $this->logger->info('Reel: auto-queued {count} render job(s) for user {user}', [
+                'count' => $queued,
+                'user' => $userId,
+            ]);
+        }
+    }
+
+    /** @return array<int, array{id:int}> */
+    private function loadLatestRenderableEvents(string $userId, int $limit): array {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select('id')
+            ->from('reel_events')
+            ->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+            ->andWhere($qb->expr()->isNull('video_file_id'))
+            ->andWhere($qb->expr()->isNull('parent_event_id'))
+            ->orderBy('date_start', 'DESC')
+            ->setMaxResults($limit);
+
+        return array_map(static fn(array $row): array => ['id' => (int)$row['id']], $qb->executeQuery()->fetchAll());
+    }
+
+    private function hasActiveRenderJob(int $eventId, string $userId): bool {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select('id')
+            ->from('reel_jobs')
+            ->where($qb->expr()->eq('event_id', $qb->createNamedParameter($eventId, IQueryBuilder::PARAM_INT)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+            ->andWhere($qb->expr()->in('status', $qb->createNamedParameter(['pending', 'running'], IQueryBuilder::PARAM_STR_ARRAY)))
+            ->setMaxResults(1);
+
+        return $qb->executeQuery()->fetchOne() !== false;
     }
 }
