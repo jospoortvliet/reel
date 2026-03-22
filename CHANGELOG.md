@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Updated one screenshot, added another
+
+### Fixed
+
+- UX: event list scroll position is now preserved when navigating back from event detail view.
+
 ## [2.0.0] - 2026-03-22
 
 ### Added
