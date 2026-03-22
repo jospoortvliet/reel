@@ -43,6 +43,10 @@ Example use cases
 		<url>https://raw.githubusercontent.com/jospoortvliet/reel/main/screenshot_reel_video_trim.png</url>
 		<alt>Reel app screenshot showing a highlight video trim settings</alt>
 	</screenshot>
+	<screenshot>
+		<url>https://raw.githubusercontent.com/jospoortvliet/reel/main/screenshot_reel_settings.png</url>
+		<alt>Reel app screenshot showing the application settings</alt>
+	</screenshot>
 	<version>2.0.0</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="hello@jospoortvliet.com" homepage="https://jospoortvliet.com">Jos Poortvliet</author>
