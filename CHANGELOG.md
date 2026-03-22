@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updated one screenshot, added another
+- Settings UI now saves changes automatically instead of requiring an explicit Save button.
 
 ### Fixed
 

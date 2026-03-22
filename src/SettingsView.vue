@@ -131,24 +131,16 @@
 			</section>
 
 			<div :class="$style.actions">
-				<NcButton
-					type="button"
-					variant="primary"
-					:disabled="saving"
-					@click="save">
-					<template #icon>
-						<NcLoadingIcon v-if="saving" :size="20" />
-					</template>
-					{{ t('reel', 'Save settings') }}
-				</NcButton>
-				<span v-if="saved" :class="$style.savedMsg">{{ t('reel', '✓ Saved') }}</span>
+				<NcLoadingIcon v-if="saving" :size="20" />
+				<span v-if="saving" :class="$style.statusMsg">{{ t('reel', 'Saving settings…') }}</span>
+				<span v-else-if="saved" :class="$style.savedMsg">{{ t('reel', '✓ Settings saved') }}</span>
 			</div>
 		</template>
 	</div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import axios from '@nextcloud/axios'
 import { generateOcsUrl } from '@nextcloud/router'
 import { getFilePickerBuilder, showError } from '@nextcloud/dialogs'
@@ -165,6 +157,11 @@ withDefaults(defineProps<{
 const loading = ref(true)
 const saving  = ref(false)
 const saved   = ref(false)
+const autoSaveReady = ref(false)
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+let pendingSave = false
+let lastSavedSnapshot = ''
 
 const form = ref({
 	burstGap:    5,
@@ -184,12 +181,38 @@ onMounted(async () => {
 		form.value.orientation = data.output_orientation ?? 'landscape_16_9'
 		form.value.customMusicFolder = data.custom_music_folder ?? ''
 		form.value.autoCreateVideos = !!data.auto_create_videos
+		lastSavedSnapshot = buildSnapshot()
+		autoSaveReady.value = true
 	} catch (e) {
 		showError(t('reel', 'Failed to load settings'))
 	} finally {
 		loading.value = false
 	}
 })
+
+onBeforeUnmount(() => {
+	if (saveTimer) {
+		clearTimeout(saveTimer)
+	}
+})
+
+watch(form, () => {
+	if (!autoSaveReady.value || loading.value) {
+		return
+	}
+
+	saved.value = false
+	if (saveTimer) {
+		clearTimeout(saveTimer)
+	}
+	saveTimer = setTimeout(() => {
+		void save()
+	}, 450)
+}, { deep: true })
+
+function buildSnapshot(): string {
+	return JSON.stringify(form.value)
+}
 
 async function pickCustomMusicFolder() {
 	try {
@@ -213,6 +236,25 @@ async function pickCustomMusicFolder() {
 }
 
 async function save() {
+	if (!autoSaveReady.value) {
+		return
+	}
+
+	const nextSnapshot = buildSnapshot()
+	if (nextSnapshot === lastSavedSnapshot) {
+		return
+	}
+
+	if (saveTimer) {
+		clearTimeout(saveTimer)
+		saveTimer = null
+	}
+
+	if (saving.value) {
+		pendingSave = true
+		return
+	}
+
 	saving.value = true
 	saved.value  = false
 	try {
@@ -224,12 +266,17 @@ async function save() {
 			custom_music_folder:  form.value.customMusicFolder,
 			auto_create_videos:   form.value.autoCreateVideos,
 		}, { params: { format: 'json' } })
+		lastSavedSnapshot = buildSnapshot()
 		saved.value = true
 		setTimeout(() => { saved.value = false }, 3000)
 	} catch (e) {
 		showError(t('reel', 'Failed to save settings'))
 	} finally {
 		saving.value = false
+		if (pendingSave) {
+			pendingSave = false
+			void save()
+		}
 	}
 }
 </script>
@@ -320,10 +367,16 @@ async function save() {
 	align-items: center;
 	gap: 16px;
 	margin-top: 8px;
+	min-height: 28px;
 }
 
 .savedMsg {
 	color: var(--color-success);
+	font-weight: 500;
+}
+
+.statusMsg {
+	color: var(--color-text-maxcontrast);
 	font-weight: 500;
 }
 
