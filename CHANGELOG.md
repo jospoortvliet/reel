@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-22
+
 ### Added
 
 - Video opening: title and date overlay displayed for 2.5 s at the start of each reel, positioned in the bottom third of the frame (works for both landscape and portrait).
@@ -33,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup/runtime: removed invalid `registerCommand()` calls from app bootstrap registration; commands continue to be declared via `appinfo/info.xml`.
 - DX: resolved current Intelephense diagnostics by aligning `NcButton` prop usage in settings UI and by adding lightweight local type stubs for optional Imagick symbols used by analyzer tooling.
 - Tests/bootstrap: switched optional Doctrine/OC symbol guards to string-based checks to avoid unresolved-type static-analysis noise.
+- UX: cancelling the file picker in add-media flow no longer leaves the button stuck in "Adding…" state.
+- UX: inline rename button is now a small pen icon instead of a text button, keeping it flush next to the event title.
 
 ## [1.1.8] - 2026-03-21
 
