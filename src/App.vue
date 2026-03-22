@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { translate as t } from '@nextcloud/l10n'
 import NcAppContent from '@nextcloud/vue/components/NcAppContent'
@@ -95,19 +95,20 @@ interface MusicOption {
 // State
 // -------------------------------------------------------------------------
 
-const events        = ref<Event[]>([])
-const selectedEvent = ref<EventDetail | null>(null)
-const loading       = ref(false)
-const showSettingsModal = ref(false)
-const showClipEditor = ref(false)
-const clipEditorItem = ref<MediaItem | null>(null)
-const clipStart = ref(0)
-const clipLength = ref(2)
-const isEditingTitle = ref(false)
-const titleDraft = ref('')
-const savingTitle = ref(false)
-const addingMedia = ref(false)
-let   pollTimer     = null as ReturnType<typeof setInterval> | null
+const events              = ref<Event[]>([])
+const selectedEvent       = ref<EventDetail | null>(null)
+const loading             = ref(false)
+const showSettingsModal   = ref(false)
+const showClipEditor      = ref(false)
+const clipEditorItem      = ref<MediaItem | null>(null)
+const clipStart           = ref(0)
+const clipLength          = ref(2)
+const isEditingTitle      = ref(false)
+const titleDraft          = ref('')
+const savingTitle         = ref(false)
+const addingMedia         = ref(false)
+const appContent          = ref<InstanceType<typeof NcAppContent> | null>(null)
+let   pollTimer           = null as ReturnType<typeof setInterval> | null
 
 const currentTheme = computed(() => {
 	if (!selectedEvent.value) return 'indie_pop'
@@ -156,6 +157,9 @@ async function loadMusicOptions() {
 }
 
 async function selectEvent(event: Event) {
+	// Save scroll position to sessionStorage before navigating
+	const scrollTop = (appContent.value?.$el as HTMLElement)?.scrollTop ?? 0
+	sessionStorage.setItem('reel:eventListScroll', String(scrollTop))
 	await router.push({ name: 'event', params: { id: event.id } })
 }
 
@@ -599,6 +603,14 @@ watch(() => route.params.id, async (id) => {
 		isEditingTitle.value = false
 		titleDraft.value = ''
 		selectedEvent.value = null
+
+		// Restore scroll position from sessionStorage when returning to list
+		await nextTick()
+		const scrollTop = parseInt(sessionStorage.getItem('reel:eventListScroll') ?? '0', 10)
+		const scrollableElement = (appContent.value?.$el as HTMLElement)
+		if (scrollableElement && scrollTop > 0) {
+			scrollableElement.scrollTop = scrollTop
+		}
 	}
 })
 </script>
@@ -617,7 +629,7 @@ watch(() => route.params.id, async (id) => {
 			</template>
 		</NcAppNavigation>
 
-		<NcAppContent>
+		<NcAppContent ref="appContent">
 
 			<!-- Loading state -->
 			<div v-if="loading" :class="$style.centered">
@@ -625,7 +637,9 @@ watch(() => route.params.id, async (id) => {
 			</div>
 
 			<!-- Event list -->
-			<div v-else-if="!selectedEvent && !route.params.id" :class="$style.eventList">
+			<div
+				v-else-if="!selectedEvent && !route.params.id"
+				:class="$style.eventList">
 				<div :class="$style.header">
 					<h2>{{ t('reel', 'Your Reels') }}</h2>
 					<p>{{ t('reel', '{n} events detected from your photo library', { n: events.length }) }}</p>
