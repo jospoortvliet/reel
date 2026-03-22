@@ -41,7 +41,7 @@ class EventDetectionService {
     // --- Tag-based title enrichment ---
 
     // Fraction of items in a cluster that must carry a tag for it to appear in the title
-    private const TAG_DOMINANT_THRESHOLD = 0.70;
+    private const TAG_DOMINANT_THRESHOLD = 0.30;
 
     // Tags that are too generic, noisy, or meta to add value to an event title
     private const TAG_BLOCKLIST = [
@@ -133,6 +133,7 @@ class EventDetectionService {
         private UtilityFilterService $utilityFilter,
         private DuplicateFilterService $duplicateFilter,
         private DistinctFilterService $distinctFilter,
+        private TriptychOptimizerService $triptychOptimizer,
         private MemoriesRepository   $memoriesRepository,
         private IRootFolder          $rootFolder,
         private MusicService         $musicService,
@@ -637,9 +638,9 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
     }
 
     /**
-     * Given a map of tag → occurrence-count and total item count for a cluster,
-     * returns the single most-specific tag that exceeds TAG_DOMINANT_THRESHOLD,
-     * or null if none qualifies.
+    * Given a map of tag → occurrence-count and total item count for a cluster,
+    * returns the most frequent non-blocked tag when it exceeds
+    * TAG_DOMINANT_THRESHOLD, or null if none qualifies.
      *
      * @param array<string, int> $tagCounts
      */
@@ -661,14 +662,17 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             return null;
         }
 
-        // Sort by specificity desc, then by count desc
+        // Sort by count desc, then by specificity desc as a tiebreaker.
         uksort($qualifying, function (string $a, string $b) use ($qualifying): int {
+            if ($qualifying[$a] !== $qualifying[$b]) {
+                return $qualifying[$b] <=> $qualifying[$a];
+            }
             $sa = self::TAG_SPECIFICITY[$a] ?? 5;
             $sb = self::TAG_SPECIFICITY[$b] ?? 5;
             if ($sa !== $sb) {
                 return $sb - $sa;
             }
-            return $qualifying[$b] - $qualifying[$a];
+            return strcmp($a, $b);
         });
 
         return array_key_first($qualifying);
@@ -1607,6 +1611,15 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
         if ($distinctExcluded > 0) {
             $this->logger->debug('Reel: excluded {n} low-distinct media from new event {id}', [
                 'n' => $distinctExcluded,
+                'id' => $eventId,
+            ]);
+        }
+
+        // Triptych optimization: re-enable deselected media that create triptychs
+        $triptychReEnabled = $this->triptychOptimizer->optimizeEvent($eventId, $userId, $this->debugCallback);
+        if ($triptychReEnabled > 0) {
+            $this->logger->debug('Reel: triptych optimizer re-enabled {n} media in event {id}', [
+                'n' => $triptychReEnabled,
                 'id' => $eventId,
             ]);
         }
