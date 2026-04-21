@@ -9,15 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Event detection: new Tier A triptych optimizer (`TriptychOptimizerService`) that runs after duplicate and distinct filtering. It intelligently re-enables deselected media to create valid triptych segments in rendered videos, increasing visual variety without affecting total video length. The optimizer uses a 4-strategy approach: checks previous 2 items, previous 1 + next 1, next 2 items, or smart re-enable combinations within temporal proximity.
+- Developer docs: added project-level `AGENTS.md` with architecture, build/test, and coding conventions for contributors and coding agents.
 
 ### Changed
 - Updated one screenshot, added another
 - Settings UI now saves changes automatically instead of requiring an explicit Save button.
 - Event naming now adds the most frequent qualifying tag once it appears on at least 30% of an event's media, making tag-based titles appear more often.
+- Debug command: `reel:debug-duplicates` now runs the full post-insert media selection pipeline (utility filter, duplicate suppression, distinct filter, triptych optimization) to match real detection behavior.
+- Debug command: added `--debug` for detailed filter logs and `--apply` to persist results; default mode is preview with transaction rollback.
+- Rendering: panorama stills now get extended pan duration for slower sweeps.
+- Rendering: large group photos now use bounded pan+zoom motion with longer duration; group-photo framing duration scales more with face count.
+- Rendering/jobs: enforced a global render lock so only one render job can execute at a time across overlapping cron/occ processes.
+- Event list UX: event cards now use router links so browser hover shows destination URLs while keeping SPA navigation (no full page reload).
 
 ### Fixed
 
 - UX: event list scroll position is now preserved when navigating back from event detail view.
+- Backend deprecation: replaced deprecated `IDBConnection::lastInsertId()` usage with `IQueryBuilder::getLastInsertId()` in event insertion.
+- Rendering diagnostics: FFmpeg failure logs now include signal/close-code/command context, making `exit -1` failures debuggable.
 
 ## [2.0.0] - 2026-03-22
 

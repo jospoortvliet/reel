@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\Reel\Service;
 
+use OCP\Files\IRootFolder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
@@ -31,8 +32,15 @@ class UtilityFilterService {
         'receipt', 'invoice', 'bill', 'menu', 'qr', 'barcode', 'code', 'serial', 'note',
     ];
 
+    private const OCR_WORD_THRESHOLD = 20;
+    private const OCR_MIN_CONFIDENCE = 60;
+    private const EXPOSURE_MEAN_LOW = 0.08;
+    private const EXPOSURE_MEAN_HIGH = 0.92;
+    private const EXPOSURE_STDDEV_MAX = 0.06;
+
     public function __construct(
         private IDBConnection $db,
+        private IRootFolder $rootFolder,
         private LoggerInterface $logger,
     ) {}
 
@@ -79,6 +87,7 @@ class UtilityFilterService {
             $weakHits = $this->countKeywordHits($tags, self::WEAK_UTILITY_KEYWORDS);
             $strongHits = $this->countKeywordHits($tags, self::STRONG_UTILITY_KEYWORDS);
             $nameHits = $this->countSubstringHits($name, self::FILENAME_HINTS);
+            $localPath = $this->resolveLocalPath($userId, $fileId);
 
             $drop = false;
             if ($strongHits >= 1) {
@@ -89,12 +98,36 @@ class UtilityFilterService {
                 $drop = true;
             }
 
+            $ocrWords = 0;
+            // Run OCR mainly when tags/name suggest utility content but signal is borderline.
+            if (!$drop && $localPath !== null && ($strongHits >= 1 || $weakHits >= 1 || $nameHits >= 1)) {
+                $ocrWords = $this->countConfidentWords($localPath, self::OCR_MIN_CONFIDENCE);
+                if ($ocrWords >= self::OCR_WORD_THRESHOLD) {
+                    $drop = true;
+                }
+            }
+
+            $exposure = null;
+            if (!$drop && $localPath !== null) {
+                $exposure = $this->analyzeExposure($localPath);
+                if (!empty($exposure['problematic'])) {
+                    $drop = true;
+                }
+            }
+
             if (!$drop) {
                 continue;
             }
 
             $toExclude[] = $fileId;
-            $reasons[$fileId] = sprintf('weak=%d strong=%d name=%d', $weakHits, $strongHits, $nameHits);
+            $reasons[$fileId] = sprintf(
+                'weak=%d strong=%d name=%d ocr=%d exp=%s',
+                $weakHits,
+                $strongHits,
+                $nameHits,
+                $ocrWords,
+                (!empty($exposure['problematic']) ? 'problematic' : 'ok')
+            );
         }
 
         if (empty($toExclude)) {
@@ -192,6 +225,129 @@ class UtilityFilterService {
     private function emitDebug(?callable $onDebug, string $line): void {
         if ($onDebug !== null) {
             $onDebug($line);
+        }
+    }
+
+    private function resolveLocalPath(string $userId, int $fileId): ?string {
+        try {
+            $userFolder = $this->rootFolder->getUserFolder($userId);
+            $nodes = $userFolder->getById($fileId);
+            if (empty($nodes)) {
+                return null;
+            }
+
+            $node = $nodes[0];
+            $storage = $node->getStorage();
+            if (!$storage->isLocal()) {
+                return null;
+            }
+
+            $localPath = $storage->getLocalFile($node->getInternalPath());
+            if ($localPath === null || !file_exists($localPath)) {
+                return null;
+            }
+
+            return $localPath;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function countConfidentWords(string $imagePath, int $minConfidence = self::OCR_MIN_CONFIDENCE): int {
+        $ocrPath = $imagePath;
+        $tempPath = null;
+
+        // Tesseract reliability for HEIC/AVIF varies; convert first frame to JPEG when possible.
+        $ext = strtolower(pathinfo($imagePath, PATHINFO_EXTENSION));
+        if (in_array($ext, ['heic', 'heif', 'avif'], true) && class_exists(\Imagick::class)) {
+            try {
+                $tempPath = tempnam(sys_get_temp_dir(), 'reel_ocr_');
+                if ($tempPath !== false) {
+                    $jpgPath = $tempPath . '.jpg';
+                    @unlink($tempPath);
+                    $img = new \Imagick();
+                    $img->readImage($imagePath . '[0]');
+                    $img->setImageFormat('jpeg');
+                    $img->setImageCompressionQuality(90);
+                    $img->writeImage($jpgPath);
+                    $img->clear();
+                    $img->destroy();
+                    $ocrPath = $jpgPath;
+                    $tempPath = $jpgPath;
+                }
+            } catch (\Throwable) {
+                $ocrPath = $imagePath;
+                $tempPath = null;
+            }
+        }
+
+        try {
+            $escaped = escapeshellarg($ocrPath);
+            $cmd = "tesseract {$escaped} stdout --psm 1 tsv 2>/dev/null";
+            $tsv = shell_exec($cmd);
+
+            if (!is_string($tsv) || trim($tsv) === '') {
+                return 0;
+            }
+
+            $count = 0;
+            $lines = explode("\n", trim($tsv));
+            array_shift($lines); // header
+
+            foreach ($lines as $line) {
+                $fields = explode("\t", $line);
+                if (count($fields) < 12) {
+                    continue;
+                }
+
+                $conf = (int)$fields[10];
+                $text = trim((string)$fields[11]);
+                if ($text !== '' && $conf >= $minConfidence) {
+                    $count++;
+                }
+            }
+
+            return $count;
+        } finally {
+            if ($tempPath !== null && file_exists($tempPath)) {
+                @unlink($tempPath);
+            }
+        }
+    }
+
+    /** @return array{mean:float,stddev:float,underexposed:bool,overexposed:bool,problematic:bool}|null */
+    private function analyzeExposure(string $localPath): ?array {
+        if (!class_exists(\Imagick::class)) {
+            return null;
+        }
+
+        try {
+            $img = new \Imagick();
+            $img->readImage($localPath . '[0]');
+            $img->thumbnailImage(256, 256, true);
+            $img->setImageColorspace(\Imagick::COLORSPACE_GRAY);
+
+            $stats = $img->getImageChannelStatistics();
+            $img->clear();
+            $img->destroy();
+
+            $quantum = 65535.0;
+            $gray = $stats[\Imagick::CHANNEL_GRAY] ?? [];
+            $mean = (float)($gray['mean'] ?? 0.0) / max(1.0, $quantum);
+            $stddev = (float)($gray['standardDeviation'] ?? 0.0) / max(1.0, $quantum);
+
+            $isUnderexposed = $mean < self::EXPOSURE_MEAN_LOW && $stddev < self::EXPOSURE_STDDEV_MAX;
+            $isOverexposed = $mean > self::EXPOSURE_MEAN_HIGH && $stddev < self::EXPOSURE_STDDEV_MAX;
+
+            return [
+                'mean' => $mean,
+                'stddev' => $stddev,
+                'underexposed' => $isUnderexposed,
+                'overexposed' => $isOverexposed,
+                'problematic' => $isUnderexposed || $isOverexposed,
+            ];
+        } catch (\Throwable) {
+            return null;
         }
     }
 

@@ -4,24 +4,28 @@ declare(strict_types=1);
 
 namespace OCA\Reel\Command;
 
-use OCA\Reel\Service\DuplicateFilterService;
+use OCA\Reel\Service\EventDetectionService;
+use OCP\IDBConnection;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 /**
- * Debug command to preview duplicate detection for a single event.
- * Uses DuplicateFilterService::analyseEvent() directly — the exact same
- * code path as the real filter — so output is guaranteed to match what
- * filterEvent() would do. Read-only: no DB changes.
+ * Debug command to preview or apply the full post-insert filter pipeline
+ * for a single event, using EventDetectionService::applyPostInsertFilters().
  *
- * Usage: php occ reel:debug-duplicates <event-id> <user-id>
+ * Default mode is preview-only (transaction rollback).
+ * Use --apply to persist changes.
+ *
+ * Usage: php occ reel:debug-duplicates <event-id> <user-id> [--debug] [--apply]
  */
 class DebugDuplicates extends Command {
 
     public function __construct(
-        private DuplicateFilterService $duplicateFilter,
+        private EventDetectionService $eventDetectionService,
+        private IDBConnection $db,
     ) {
         parent::__construct();
     }
@@ -29,54 +33,63 @@ class DebugDuplicates extends Command {
     protected function configure(): void {
         $this
             ->setName('reel:debug-duplicates')
-            ->setDescription('Preview duplicate detection for an event (read-only)')
+            ->setDescription('Preview/apply the post-insert filter pipeline for an event')
             ->addArgument('event-id', InputArgument::REQUIRED, 'Event ID to analyse')
-            ->addArgument('user-id',  InputArgument::REQUIRED, 'User ID');
+            ->addArgument('user-id',  InputArgument::REQUIRED, 'User ID')
+            ->addOption('debug', null, InputOption::VALUE_NONE, 'Print debug lines emitted by filters')
+            ->addOption('apply', null, InputOption::VALUE_NONE, 'Persist filter changes (default is preview/rollback)');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int {
         $eventId = (int)$input->getArgument('event-id');
-        $userId  = $input->getArgument('user-id');
+        $userId  = (string)$input->getArgument('user-id');
+        $withDebug = (bool)$input->getOption('debug');
+        $apply = (bool)$input->getOption('apply');
 
-        $output->writeln("Analysing event <info>{$eventId}</info> for user <info>{$userId}</info>");
+        $modeLabel = $apply ? 'APPLY' : 'PREVIEW (ROLLBACK)';
+        $output->writeln("Running post-insert pipeline for event <info>{$eventId}</info> user <info>{$userId}</info> [{$modeLabel}]");
         $output->writeln('');
 
-        $analysis = $this->duplicateFilter->analyseEvent($eventId, $userId);
-
-        $t = $analysis['thresholds'];
-        $output->writeln(sprintf(
-            'Thresholds (from user settings): burst_gap=<info>%ds</info>  similarity=<info>%d</info>',
-            $t['burst_gap'], $t['similarity']
-        ));
-        $output->writeln('');
-
-        if (empty($analysis['bursts'])) {
-            $output->writeln('<comment>No duplicate bursts detected.</comment>');
-            return Command::SUCCESS;
+        $onDebug = null;
+        if ($withDebug) {
+            $onDebug = static function (string $line) use ($output): void {
+                $output->writeln('  <comment>' . $line . '</comment>');
+            };
         }
 
-        foreach ($analysis['bursts'] as $i => $burst) {
-            $output->writeln(sprintf('<comment>--- Burst %d (winner by: %s) ---</comment>', $i + 1, $burst['method']));
+        $this->db->beginTransaction();
+        try {
+            $result = $this->eventDetectionService->applyPostInsertFilters($eventId, $userId, $onDebug);
 
-            foreach ($burst['photos'] as $photo) {
-                $fileId   = (int)$photo['file_id'];
-                $isWinner = $fileId === $burst['winner'];
-                $marker   = $isWinner ? '<info>KEEP    </info>' : '<fg=red>EXCLUDE</fg> ';
-                $output->writeln(sprintf(
-                    '  %s  file_id=<info>%d</info>  %s',
-                    $marker,
-                    $fileId,
-                    basename($photo['name']),
-                ));
+            if ($apply) {
+                $this->db->commit();
+            } else {
+                $this->db->rollBack();
             }
+
+            $netExcluded = ($result['utility_excluded'] + $result['duplicates_excluded'] + $result['distinct_excluded']) - $result['triptych_reenabled'];
+
+            $output->writeln('Pipeline summary:');
+            $output->writeln(sprintf('  utility excluded: <info>%d</info>', $result['utility_excluded']));
+            $output->writeln(sprintf('  duplicates excluded: <info>%d</info>', $result['duplicates_excluded']));
+            $output->writeln(sprintf('  distinct excluded: <info>%d</info>', $result['distinct_excluded']));
+            $output->writeln(sprintf('  triptych re-enabled: <info>%d</info>', $result['triptych_reenabled']));
+            $output->writeln(sprintf('  net selection delta: <info>%+d</info>', -$netExcluded));
             $output->writeln('');
+
+            if ($apply) {
+                $output->writeln('<info>Changes were applied to this event.</info>');
+            } else {
+                $output->writeln('<comment>Preview mode: all changes were rolled back.</comment>');
+            }
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
         }
 
-        $totalExcluded = array_sum(array_map(fn($b) => count($b['excluded']), $analysis['bursts']));
         $output->writeln(sprintf(
-            'Would exclude <info>%d</info> photo(s) across <info>%d</info> burst(s).',
-            $totalExcluded,
-            count($analysis['bursts']),
+            'Done. Command now mirrors event-detection post-processing for event <info>%d</info>.',
+            $eventId,
         ));
 
         return Command::SUCCESS;

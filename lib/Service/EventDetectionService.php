@@ -46,9 +46,9 @@ class EventDetectionService {
     // Tags that are too generic, noisy, or meta to add value to an event title
     private const TAG_BLOCKLIST = [
         'Tagged by recognize', // prefix — matches any version string
-        'People', 'Furniture', 'Landscape', 'Nature', 'Indoor', 'Outdoor',
-        'Building', 'Info', 'Sand', 'Water', 'Display', 'Screen', 'Living',
-        'Electronics', 'Vehicle', 'Document', 'Architecture', 'Object',
+        'People', 'Furniture', 'Indoor', 'Outdoor',
+        'Info', 'Sand', 'Water', 'Display', 'Screen', 'Living',
+        'Electronics', 'Vehicle', 'Document', 'Object',
         'Structure', 'Transport', 'Text', 'Art', 'Still Life', 'Technology',
     ];
 
@@ -63,15 +63,16 @@ class EventDetectionService {
         'Animal' => 8, 'Pet' => 8,
         // Nature – specific beats generic
         'Seashore' => 18, 'Beach' => 15, 'Mountains' => 18, 'Alpine' => 15,
-        'Forest' => 12, 'Snow' => 12, 'Waterfall' => 18, 'Desert' => 15,
+        'Forest' => 12, 'Snow' => 12, 'Waterfall' => 18, 'Desert' => 15, 
+        'Landscape' => 8, 'Nature' => 5, 
         // Activities / scenes
         'Camping' => 18, 'Skiing' => 18, 'Cycling' => 15, 'Swimming' => 15,
         'Stage' => 12, 'Concert' => 18, 'Music' => 12, 'Sport' => 8,
         // Landmarks
-        'Church' => 12, 'Historic' => 10, 'Tower' => 10, 'Shop' => 8,
-        'Restaurant' => 12,
+        'Church' => 12, 'Architecture' => 8, 'Historic' => 10, 'Tower' => 10, 'Shop' => 8,
+        'Restaurant' => 12, 'Building' => 5, 'Monument' => 15, 'Bridge' => 10, 'City' => 8,
         // People
-        'Portrait' => 10,
+        'Portrait' => 10, 'Selfie' => 12, 'Group' => 8, 'Family' => 15, 'Friends' => 15,
         // Food
         'Food' => 8, 'Dining' => 8,
     ];
@@ -147,6 +148,8 @@ class EventDetectionService {
      * Rebuild mode drops and recreates all events/media for the user.
      */
     public function detectForUser(string $userId, bool $rebuild = false, ?callable $onDebug = null): int {
+        $lockHandle = $this->acquireDetectionLock($userId);
+        $this->logger->debug('Reel: acquired detection lock for user {user}', ['user' => $userId]);
         $this->debugCallback = $onDebug;
         $this->logger->info('Reel: starting event detection for user {user}', ['user' => $userId]);
 
@@ -217,8 +220,35 @@ class EventDetectionService {
 
             return count($clusters);
         } finally {
+            $this->releaseDetectionLock($lockHandle);
+            $this->logger->debug('Reel: released detection lock for user {user}', ['user' => $userId]);
             $this->debugCallback = null;
         }
+    }
+
+    /** @return resource */
+    private function acquireDetectionLock(string $userId) {
+        $lockPath = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR
+            . 'reel-detect-user-' . hash('sha256', $userId) . '.lock';
+
+        $handle = @fopen($lockPath, 'c');
+        if ($handle === false) {
+            throw new \RuntimeException('Unable to open detection lock file');
+        }
+
+        if (!flock($handle, LOCK_EX)) {
+            fclose($handle);
+            throw new \RuntimeException('Unable to acquire detection lock');
+        }
+
+        return $handle;
+    }
+
+    /** @param resource $handle */
+    private function releaseDetectionLock($handle): void {
+        flock($handle, LOCK_UN);
+        fclose($handle);
     }
 
     // -------------------------------------------------------------------------
@@ -1565,7 +1595,7 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             ])
             ->executeStatement();
 
-        $eventId = (int)$this->db->lastInsertId('oc_reel_events');
+        $eventId = (int)$qb->getLastInsertId();
 
         $this->db->beginTransaction();
         try {
@@ -1590,33 +1620,47 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             throw $e;
         }
 
-        $utilityExcluded = $this->utilityFilter->filterEvent($eventId, $userId, $this->debugCallback);
+        $this->applyPostInsertFilters($eventId, $userId, $this->debugCallback);
+
+        return $eventId;
+    }
+
+    /**
+     * Runs the same post-insert pipeline used during detection:
+     * utility filter -> duplicate suppression -> distinct filter -> triptych optimizer.
+     *
+     * Exposed so debug tooling can reuse the exact production path.
+     *
+     * @return array{utility_excluded:int, duplicates_excluded:int, distinct_excluded:int, triptych_reenabled:int}
+     */
+    public function applyPostInsertFilters(int $eventId, string $userId, ?callable $onDebug = null): array {
+        $utilityExcluded = $this->utilityFilter->filterEvent($eventId, $userId, $onDebug);
         if ($utilityExcluded > 0) {
-            $this->logger->debug('Reel: excluded {n} utility media from new event {id}', [
+            $this->logger->debug('Reel: excluded {n} utility media from event {id}', [
                 'n' => $utilityExcluded,
                 'id' => $eventId,
             ]);
         }
 
         // Duplicate suppression is useful for all event kinds.
-        $excluded = $this->duplicateFilter->filterEvent($eventId, $userId, $this->debugCallback);
-        if ($excluded > 0) {
-            $this->logger->debug('Reel: excluded {n} duplicates from new event {id}', [
-                'n' => $excluded,
+        $duplicatesExcluded = $this->duplicateFilter->filterEvent($eventId, $userId, $onDebug);
+        if ($duplicatesExcluded > 0) {
+            $this->logger->debug('Reel: excluded {n} duplicates from event {id}', [
+                'n' => $duplicatesExcluded,
                 'id' => $eventId,
             ]);
         }
 
-        $distinctExcluded = $this->distinctFilter->filterEvent($eventId, $userId, $this->debugCallback);
+        $distinctExcluded = $this->distinctFilter->filterEvent($eventId, $userId, $onDebug);
         if ($distinctExcluded > 0) {
-            $this->logger->debug('Reel: excluded {n} low-distinct media from new event {id}', [
+            $this->logger->debug('Reel: excluded {n} low-distinct media from event {id}', [
                 'n' => $distinctExcluded,
                 'id' => $eventId,
             ]);
         }
 
-        // Triptych optimization: re-enable deselected media that create triptychs
-        $triptychReEnabled = $this->triptychOptimizer->optimizeEvent($eventId, $userId, $this->debugCallback);
+        // Triptych optimization: re-enable deselected media that create triptychs.
+        $triptychReEnabled = $this->triptychOptimizer->optimizeEvent($eventId, $userId, $onDebug);
         if ($triptychReEnabled > 0) {
             $this->logger->debug('Reel: triptych optimizer re-enabled {n} media in event {id}', [
                 'n' => $triptychReEnabled,
@@ -1624,7 +1668,12 @@ private function probeDurationWithFfprobe(string $localPath): ?float {
             ]);
         }
 
-        return $eventId;
+        return [
+            'utility_excluded' => $utilityExcluded,
+            'duplicates_excluded' => $duplicatesExcluded,
+            'distinct_excluded' => $distinctExcluded,
+            'triptych_reenabled' => $triptychReEnabled,
+        ];
     }
 
     private function pickRandomTheme(string $userId): string {

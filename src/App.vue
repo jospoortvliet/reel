@@ -91,6 +91,10 @@ interface MusicOption {
 	kind: 'genre' | 'custom'
 }
 
+interface OCAViewer {
+	open: (args: { path: string }) => void
+}
+
 // -------------------------------------------------------------------------
 // State
 // -------------------------------------------------------------------------
@@ -156,11 +160,10 @@ async function loadMusicOptions() {
 	}
 }
 
-async function selectEvent(event: Event) {
+function rememberListScroll() {
 	// Save scroll position to sessionStorage before navigating
 	const scrollTop = (appContent.value?.$el as HTMLElement)?.scrollTop ?? 0
 	sessionStorage.setItem('reel:eventListScroll', String(scrollTop))
-	await router.push({ name: 'event', params: { id: event.id } })
 }
 
 function backToList() {
@@ -337,12 +340,14 @@ async function updateEventTheme(theme: string) {
 }
 
 function openMediaInViewer(item: MediaItem) {
-	if (window.OCA?.Viewer) {
-		window.OCA.Viewer.open({ path: item.viewer_path })
+	const viewer = (window as Window & { OCA?: { Viewer?: OCAViewer } }).OCA?.Viewer
+	if (viewer?.open) {
+		viewer.open({ path: item.viewer_path })
 	}
 }
 
 async function toggleLiveVideo(item: MediaItem) {
+	if (!selectedEvent.value) return
 	try {
 		const url = generateOcsUrl(`/apps/reel/api/v1/events/${selectedEvent.value.id}/media/${item.file_id}`)
 		await axios.put(url, { use_live_video: !item.use_live_video }, { params: { format: 'json' } })
@@ -467,8 +472,9 @@ function openInViewer() {
 	const path = selectedEvent.value?.video_path
 	if (!path) return
 	// OCA.Viewer is loaded via LoadViewer event dispatched in PageController
-	if (window.OCA?.Viewer?.open) {
-		window.OCA.Viewer.open({ path })
+	const viewer = (window as Window & { OCA?: { Viewer?: OCAViewer } }).OCA?.Viewer
+	if (viewer?.open) {
+		viewer.open({ path })
 	} else {
 		console.error('Reel: OCA.Viewer not available')
 	}
@@ -569,7 +575,7 @@ const PROGRESS_MESSAGES: [number, string][] = [
 const progressMessage = computed(() => {
 	const p = jobProgress.value
 	if (jobStatus.value === 'pending') return '⏳ Waiting for cron to wake up…'
-	let msg = PROGRESS_MESSAGES[0][1]
+	let msg = PROGRESS_MESSAGES[0]?.[1] ?? '⏳ Working on your video…'
 	for (const [threshold, text] of PROGRESS_MESSAGES) {
 		if (p >= threshold) msg = text
 	}
@@ -651,11 +657,12 @@ watch(() => route.params.id, async (id) => {
 					:description="t('reel', 'Run occ reel:detect-events to detect events from your photos')" />
 
 				<div v-else :class="$style.grid">
-					<div
+					<RouterLink
 						v-for="event in events"
 						:key="event.id"
 						:class="$style.card"
-						@click="selectEvent(event)">
+						:to="{ name: 'event', params: { id: event.id } }"
+						@click="rememberListScroll">
 						<!-- Cover thumbnail -->
 						<div :class="$style.cardCover">
 							<img
@@ -677,12 +684,12 @@ watch(() => route.params.id, async (id) => {
 							<p :class="$style.cardMeta">{{ formatDateRange(event.date_start, event.date_end) }}</p>
 							<p :class="$style.cardMeta">{{ event.media_count }} {{ t('reel', 'items') }}</p>
 						</div>
-					</div>
+					</RouterLink>
 				</div>
 			</div>
 
 			<!-- Event detail -->
-			<div v-else :class="$style.detail">
+			<div v-else-if="selectedEvent" :class="$style.detail">
 				<div :class="$style.backRow">
 					<NcButton @click="backToList">
 						← {{ selectedEvent.parent_event_id ? t('reel', 'Parent event') : t('reel', 'All Events') }}
@@ -713,7 +720,10 @@ watch(() => route.params.id, async (id) => {
 									<NcButton :disabled="savingTitle" @click="cancelTitleEdit">
 										{{ t('reel', 'Cancel') }}
 									</NcButton>
-									<NcButton type="primary" :disabled="savingTitle || !titleDraft.trim()" @click="saveTitleEdit">
+									<NcButton
+										:class="$style.primaryActionBtn"
+										:disabled="savingTitle || !titleDraft.trim()"
+										@click="saveTitleEdit">
 										{{ savingTitle ? t('reel', 'Saving…') : t('reel', 'Save') }}
 									</NcButton>
 								</div>
@@ -743,7 +753,7 @@ watch(() => route.params.id, async (id) => {
 							{{ addingMedia ? t('reel', 'Adding…') : t('reel', 'Add media') }}
 						</NcButton>
 						<NcButton
-							type="primary"
+							:class="$style.primaryActionBtn"
 							:disabled="isRendering || includedCount < 2"
 							@click="renderEvent">
 							<template #icon>
@@ -774,7 +784,7 @@ watch(() => route.params.id, async (id) => {
 				<!-- Video ready — open in Viewer -->
 				<div v-if="selectedEvent.video_file_id && !isRendering" :class="$style.videoReady">
 					<span><span :class="[$style.ncIcon, 'icon-checkmark']" aria-hidden="true" /> {{ t('reel', 'Video ready') }}</span>
-					<NcButton type="primary" @click="openInViewer">
+					<NcButton :class="$style.primaryActionBtn" @click="openInViewer">
 						{{ t('reel', 'Play video') }}
 					</NcButton>
 				</div>
@@ -939,7 +949,7 @@ watch(() => route.params.id, async (id) => {
 
 					<div :class="$style.clipButtons">
 						<NcButton @click="resetClipWindow">{{ t('reel', 'Reset') }}</NcButton>
-						<NcButton type="primary" @click="saveClipWindow">{{ t('reel', 'Save') }}</NcButton>
+						<NcButton :class="$style.primaryActionBtn" @click="saveClipWindow">{{ t('reel', 'Save') }}</NcButton>
 					</div>
 				</div>
 			</div>
@@ -1185,6 +1195,22 @@ watch(() => route.params.id, async (id) => {
 	border-radius: var(--border-radius);
 	border: 1px solid var(--color-border-dark);
 	background: var(--color-main-background);
+}
+
+.primaryActionBtn :global(button) {
+	background: var(--color-primary-element);
+	color: var(--color-primary-element-text);
+	border-color: var(--color-primary-element);
+}
+
+.primaryActionBtn :global(button:hover:not(:disabled)),
+.primaryActionBtn :global(button:focus-visible:not(:disabled)) {
+	background: var(--color-primary-element-hover);
+	border-color: var(--color-primary-element-hover);
+}
+
+.primaryActionBtn :global(button:disabled) {
+	opacity: 0.65;
 }
 
 /* ---- Progress bar ---- */

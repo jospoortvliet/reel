@@ -44,6 +44,12 @@ class RenderJob extends QueuedJob {
         $userId  = (string)$argument['user_id'];
         $jobId   = (int)$argument['job_id'];
         $notifyOnDone = !empty($argument['notify_on_done']);
+        $lockHandle = $this->acquireRenderLock();
+
+        $this->logger->debug('Reel: acquired global render lock for event {event}, job {job}', [
+            'event' => $eventId,
+            'job'   => $jobId,
+        ]);
 
         $this->logger->info('Reel: RenderJob starting for event {event}, job {job}', [
             'event' => $eventId,
@@ -84,7 +90,38 @@ class RenderJob extends QueuedJob {
                 'msg'   => $e->getMessage(),
             ]);
             $this->updateJobStatus($jobId, 'failed', 0, $e->getMessage());
+        } finally {
+            $this->releaseRenderLock($lockHandle);
+            $this->logger->debug('Reel: released global render lock for event {event}, job {job}', [
+                'event' => $eventId,
+                'job'   => $jobId,
+            ]);
         }
+    }
+
+    /** @return resource */
+    private function acquireRenderLock() {
+        $lockPath = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR
+            . 'reel-render-global.lock';
+
+        $handle = @fopen($lockPath, 'c');
+        if ($handle === false) {
+            throw new \RuntimeException('Unable to open render lock file');
+        }
+
+        if (!flock($handle, LOCK_EX)) {
+            fclose($handle);
+            throw new \RuntimeException('Unable to acquire render lock');
+        }
+
+        return $handle;
+    }
+
+    /** @param resource $handle */
+    private function releaseRenderLock($handle): void {
+        flock($handle, LOCK_UN);
+        fclose($handle);
     }
 
     private function updateEventVideoFileId(int $eventId, string $userId, int $fileId): void {

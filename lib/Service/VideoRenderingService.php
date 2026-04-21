@@ -45,13 +45,18 @@ class VideoRenderingService {
 
     private const FFMPEG_TIMEOUT_SECONDS = 1800;
     private const FFMPEG_STDERR_MAX_BYTES = 262144;
-    private const TARGET_ASPECT = self::WIDTH / self::HEIGHT;
     private const MUSIC_BASE_VOLUME = 0.50;
     private const MUSIC_DUCKED_VOLUME = 1.00;
-    private const MUSIC_FADE_OUT_SECONDS = 2.4;
     private const AUDIO_CROSSFADE_SECONDS = 0.10;
     private const INTRO_TEXT_DURATION_SECONDS = 2.5;
     private const OUTRO_VIDEO_FADE_SECONDS = 3.0;
+    
+    // Motion style defaults and limits — must match SettingsController and EventDetectionService
+    private const PAN_MISMATCH_THRESHOLD_DEFAULT = 1.40;
+    private const PAN_SWEEP_MARGIN_DEFAULT = 0.08;
+    private const PANORAMA_SWEEP_MARGIN_DEFAULT = 0.02;
+    private const FACE_ZOOM_TARGET_FILL_DEFAULT = 0.75;
+    private const NON_FACE_ZOOM_END_DEFAULT = 1.42;
 
     private int $outputWidth = self::WIDTH;
     private int $outputHeight = self::HEIGHT;
@@ -69,13 +74,27 @@ class VideoRenderingService {
      * Render a video for the given event ID.
      * Returns the Nextcloud file ID of the generated video.
      */
-    public function renderEvent(int $eventId, string $userId, ?callable $onProgress = null, ?callable $onDebug = null): int {
+    public function renderEvent(
+    int $eventId,          // The ID of the event to render
+    string $userId,        // The ID of the user triggering the render
+    ?callable $onProgress = null,  // Optional function to report progress
+    ?callable $onDebug = null      // Optional function to report debug info
+    ): int {                   // Returns an integer (likely a status or count)
         $this->logger->info('Reel: starting render for event {id}', ['id' => $eventId]);
 
         [$this->outputWidth, $this->outputHeight] = $this->getOutputDimensions($userId);
 
         $event = $this->loadEvent($eventId, $userId);
         $media = $this->loadIncludedMedia($eventId, $userId);
+        
+        if (empty($media)) {
+            throw new \RuntimeException("Event {$eventId} has no included media");
+        }
+
+        if ($onDebug) {
+            $onDebug('Loaded event ' . $eventId . ' with ' . count($media) . ' media items');
+            $onDebug('Starting render for event ' . $eventId);
+        }
 
         if (count($media) < 2) {
             throw new \RuntimeException("Event {$eventId} has fewer than 2 included media items");
@@ -90,7 +109,6 @@ class VideoRenderingService {
 
         $tempDir = sys_get_temp_dir() . '/reel_' . $eventId . '_' . uniqid('', true);
         mkdir($tempDir, 0700, true);
-        $renderSucceeded = false;
 
         try {
             // Pass 1: normalize each item to an intermediate clip
@@ -121,8 +139,6 @@ class VideoRenderingService {
                 'id'     => $eventId,
                 'fileId' => $fileId,
             ]);
-
-            $renderSucceeded = true;
 
             return $fileId;
 
@@ -223,7 +239,7 @@ class VideoRenderingService {
             }
 
             $cmd = $item['is_video']
-                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $clipDuration, (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0), 'apple_subtle')
+                ? $this->buildVideoNormalizeCmd($inputPath, $outPath, $clipDuration, (float)($item['start_at'] ?? 0.0), (int)($item['w'] ?? 0), (int)($item['h'] ?? 0))
                 : $this->buildPhotoNormalizeCmd($inputPath, $outPath, $clipDuration, $item['motion']);
 
             $this->logger->debug('Reel: normalizing item {i}/{total}', [
@@ -278,7 +294,7 @@ class VideoRenderingService {
      * Normalize a video clip to standard intermediate format.
      * Handles any input codec/container.
      */
-    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0, int $videoW = 0, int $videoH = 0, string $motionStyle = 'apple_subtle'): array {
+    private function buildVideoNormalizeCmd(string $inputPath, string $outputPath, float $duration, float $startAt = 0.0, int $videoW = 0, int $videoH = 0): array {
         $cmd = [
             'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
             '-i', $inputPath,
@@ -290,54 +306,53 @@ class VideoRenderingService {
             $cmd[] = number_format($startAt, 3, '.', '');
         }
 
-        // For apple_subtle, use a blurred fill background instead of black bars
-        // when the video aspect ratio differs from the output (e.g. portrait video
-        // in a landscape frame, or landscape video in a portrait frame).
-        if ($motionStyle === 'apple_subtle' && $videoW > 0 && $videoH > 0) {
-            $outW = $this->outputWidth();
-            $outH = $this->outputHeight();
-            $targetAspect = $this->targetAspect();
-            $videoAspect  = $videoW / $videoH;
-            $aspectDiff   = abs($videoAspect - $targetAspect) / $targetAspect;
+        // Use a blurred fill background instead of black bars when the video aspect
+        // ratio differs from the output (e.g. portrait video in a landscape frame,
+        // or landscape video in a portrait frame).
+        $outW = $this->outputWidth();
+        $outH = $this->outputHeight();
+        $targetAspect = $this->targetAspect();
+        $videoAspect  = $videoW / $videoH;
+        $aspectDiff   = abs($videoAspect - $targetAspect) / $targetAspect;
 
-            if ($aspectDiff > 0.02) {
-                // Fit the video into the output frame (no crop), letterbox/pillarbox.
-                if ($videoAspect >= $targetAspect) {
-                    $fitW = $outW;
-                    $fitH = (int)(round($outW / $videoAspect / 2) * 2);
-                } else {
-                    $fitH = $outH;
-                    $fitW = (int)(round($outH * $videoAspect / 2) * 2);
-                }
-                $overlayX = (int)(($outW - $fitW) / 2);
-                $overlayY = (int)(($outH - $fitH) / 2);
-
-                $fc = implode(';', [
-                    '[0:v]split=2[bgsrc][fgsrc]',
-                    "[bgsrc]scale=w={$outW}:h={$outH}:force_original_aspect_ratio=increase,crop={$outW}:{$outH},gblur=sigma=36,eq=saturation=0.92:brightness=-0.02[bg]",
-                    "[fgsrc]scale=w={$fitW}:h={$fitH}:flags=lanczos[fg]",
-                    "[bg][fg]overlay=x={$overlayX}:y={$overlayY},setsar=1[vout]",
-                ]);
-
-                return array_merge($cmd, [
-                    '-t', number_format($duration, 3, '.', ''),
-                    '-filter_complex', $fc,
-                    '-map', '[vout]',
-                    '-map', '0:a:0?',     // first audio stream only, if exists
-                    '-af', 'aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS',
-                    '-r', (string)self::FPS,
-                    '-c:v', 'libx264',
-                    '-preset', 'fast',
-                    '-crf', '18',
-                    '-c:a', 'aac',
-                    '-ar', '44100',
-                    '-ac', '2',
-                    '-movflags', '+faststart',
-                    $outputPath,
-                ]);
+        if ($aspectDiff > 0.02) {
+            // Fit the video into the output frame (no crop), letterbox/pillarbox.
+            if ($videoAspect >= $targetAspect) {
+                $fitW = $outW;
+                $fitH = (int)(round($outW / $videoAspect / 2) * 2);
+            } else {
+                $fitH = $outH;
+                $fitW = (int)(round($outH * $videoAspect / 2) * 2);
             }
-        }
+            $overlayX = (int)(($outW - $fitW) / 2);
+            $overlayY = (int)(($outH - $fitH) / 2);
 
+            $fc = implode(';', [
+                '[0:v]split=2[bgsrc][fgsrc]',
+                "[bgsrc]scale=w={$outW}:h={$outH}:force_original_aspect_ratio=increase,crop={$outW}:{$outH},gblur=sigma=36,eq=saturation=0.92:brightness=-0.02[bg]",
+                "[fgsrc]scale=w={$fitW}:h={$fitH}:flags=lanczos[fg]",
+                "[bg][fg]overlay=x={$overlayX}:y={$overlayY},setsar=1[vout]",
+            ]);
+
+            return array_merge($cmd, [
+                '-t', number_format($duration, 3, '.', ''),
+                '-filter_complex', $fc,
+                '-map', '[vout]',
+                '-map', '0:a:0?',     // first audio stream only, if exists
+                '-af', 'aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS',
+                '-r', (string)self::FPS,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '18',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-movflags', '+faststart',
+                $outputPath,
+            ]);
+        }
+        
+        
         return array_merge($cmd, [
             '-t', number_format($duration, 3, '.', ''),
             '-vf', $this->scaleFilter(),
@@ -362,7 +377,6 @@ class VideoRenderingService {
      */
     private function buildPhotoNormalizeCmd(string $inputPath, string $outputPath, float $duration, array $motion): array {
         $frameCount = (int)ceil($duration * self::FPS);
-
         $style = (string)($motion['style'] ?? 'apple_subtle');
         $zoomStartRaw = (float)($motion['zoom_start'] ?? 1.0);
         $zoomEndRaw = (float)($motion['zoom_end'] ?? 1.0);
@@ -380,15 +394,14 @@ class VideoRenderingService {
         $outH = $this->outputHeight();
         $targetAspect = $this->targetAspect();
         $coverScale = "scale=w='if(gte(iw/ih," . $targetAspect . "),-2," . $outW . ")':h='if(gte(iw/ih," . $targetAspect . ")," . $outH . ",-2)'";
-        $coverCrop = 'crop=' . $outW . ':' . $outH . ':(iw-' . $outW . ')/2:(ih-' . $outH . ')/2';
-
+ 
         $t = '(n/' . $framesMinusOne . ')';
         $zoomEase = $this->easeInOutCubicExpr($t);
-
+        
         if ($style === 'apple_subtle') {
             // Clamp zoom range to subtle values.
-            $appleZoomStart = $this->clamp($zoomStartRaw, 0.98, 1.06);
-            $appleZoomEnd   = $this->clamp($zoomEndRaw,   0.98, 1.06);
+            $appleZoomStart = $this->clamp($zoomStartRaw, 0.96, 1.06);
+            $appleZoomEnd   = $this->clamp($zoomEndRaw,   0.96, 1.06);
 
             // Compute the fit dimensions: the pixel box the photo occupies when
             // letterboxed/pillarboxed into the output frame (no cropping).
@@ -454,7 +467,6 @@ class VideoRenderingService {
                 $outputPath,
             ];
         }
-
         // For explicit pan modes, animate crop directly over the full clip duration.
         // This avoids zoompan timing quirks with looped still-image inputs.
         if ($mode === 'pan_x') {
@@ -468,6 +480,40 @@ class VideoRenderingService {
             $cropY = "max(0,min(ih-" . $outH . ",(ih-" . $outH . ")*({$fyFixed})))";
             $panCrop = "crop=" . $outW . ":" . $outH . ":'{$cropX}':'{$cropY}'";
             $vf = implode(',', [$coverScale, $panCrop, 'setsar=1']);
+
+            return [
+                'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                '-loop', '1',
+                '-i', $inputPath,
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-t', number_format($duration, 2, '.', ''),
+                '-vf', $vf,
+                '-r', (string)self::FPS,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '18',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-shortest',
+                '-movflags', '+faststart',
+                $outputPath,
+            ];
+        }
+
+        if ($mode === 'pan_x_zoom') {
+            $fxStart = number_format((float)($motion['fx_start'] ?? 0.40), 4, '.', '');
+            $fxEnd = number_format((float)($motion['fx_end'] ?? 0.60), 4, '.', '');
+            $fyFixed = number_format((float)($motion['fy'] ?? 0.5), 4, '.', '');
+            $panT = '(n/' . $framesMinusOne . ')';
+            $panEase = $this->easeInOutCubicExpr($panT);
+            $fxExpr = "{$fxStart}+({$fxEnd}-{$fxStart})*{$panEase}";
+            $zoomExpr = "{$zoomStart}+({$zoomEnd}-{$zoomStart})*{$zoomEase}";
+            $animatedScale = "scale=w='trunc(iw*({$zoomExpr})/2)*2':h='trunc(ih*({$zoomExpr})/2)*2':flags=lanczos:eval=frame";
+            $cropX = "max(0,min(iw-" . $outW . ",(iw-" . $outW . ")*({$fxExpr})))";
+            $cropY = "max(0,min(ih-" . $outH . ",(ih-" . $outH . ")*({$fyFixed})))";
+            $animatedCrop = "crop=" . $outW . ":" . $outH . ":'{$cropX}':'{$cropY}'";
+            $vf = implode(',', [$coverScale, $animatedScale, $animatedCrop, 'setsar=1']);
 
             return [
                 'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
@@ -521,33 +567,73 @@ class VideoRenderingService {
             ];
         }
 
-        $zoomExpr = "{$zoomStart}+({$zoomEnd}-{$zoomStart})*{$zoomEase}";
-        // Animated scale + crop avoids zoompan's integer coordinate stepping jitter.
-        $animatedScale = "scale=w='trunc(iw*({$zoomExpr})/2)*2':h='trunc(ih*({$zoomExpr})/2)*2':flags=lanczos:eval=frame";
-        $cropX = "max(0,min(iw-" . $outW . ",(iw-" . $outW . ")*({$fx})))";
-        $cropY = "max(0,min(ih-" . $outH . ",(ih-" . $outH . ")*({$fy})))";
-        $animatedCrop = "crop=" . $outW . ":" . $outH . ":'{$cropX}':'{$cropY}'";
+        if ($mode === 'pan_y_zoom') {
+            $fyStart = number_format((float)($motion['fy_start'] ?? 0.40), 4, '.', '');
+            $fyEnd = number_format((float)($motion['fy_end'] ?? 0.60), 4, '.', '');
+            $fxFixed = number_format((float)($motion['fx'] ?? 0.5), 4, '.', '');
+            $panT = '(n/' . $framesMinusOne . ')';
+            $panEase = $this->easeInOutCubicExpr($panT);
+            $fyExpr = "{$fyStart}+({$fyEnd}-{$fyStart})*{$panEase}";
+            $zoomExpr = "{$zoomStart}+({$zoomEnd}-{$zoomStart})*{$zoomEase}";
+            $animatedScale = "scale=w='trunc(iw*({$zoomExpr})/2)*2':h='trunc(ih*({$zoomExpr})/2)*2':flags=lanczos:eval=frame";
+            $cropX = "max(0,min(iw-" . $outW . ",(iw-" . $outW . ")*({$fxFixed})))";
+            $cropY = "max(0,min(ih-" . $outH . ",(ih-" . $outH . ")*({$fyExpr})))";
+            $animatedCrop = "crop=" . $outW . ":" . $outH . ":'{$cropX}':'{$cropY}'";
+            $vf = implode(',', [$coverScale, $animatedScale, $animatedCrop, 'setsar=1']);
 
-        $vf = implode(',', [$coverScale, $animatedScale, $animatedCrop, 'setsar=1']);
+            return [
+                'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                '-loop', '1',
+                '-i', $inputPath,
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-t', number_format($duration, 2, '.', ''),
+                '-vf', $vf,
+                '-r', (string)self::FPS,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '18',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-shortest',
+                '-movflags', '+faststart',
+                $outputPath,
+            ];
+        }
 
-        return [
-            'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
-            '-loop', '1',
-            '-i', $inputPath,
-            '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-            '-t', number_format($duration, 2, '.', ''),
-            '-vf', $vf,
-            '-r', (string)self::FPS,
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '18',
-            '-c:a', 'aac',
-            '-ar', '44100',
-            '-ac', '2',
-            '-shortest',
-            '-movflags', '+faststart',
-            $outputPath,
-        ];
+        if ($mode === 'zoom') {
+            // For zoom mode, animate a simultaneous scale + crop zoom effect.
+            $zoomExpr = "{$zoomStart}+({$zoomEnd}-{$zoomStart})*{$zoomEase}";
+            // Animated scale + crop avoids zoompan's integer coordinate stepping jitter.
+            $animatedScale = "scale=w='trunc(iw*({$zoomExpr})/2)*2':h='trunc(ih*({$zoomExpr})/2)*2':flags=lanczos:eval=frame";
+            $cropX = "max(0,min(iw-" . $outW . ",(iw-" . $outW . ")*({$fx})))";
+            $cropY = "max(0,min(ih-" . $outH . ",(ih-" . $outH . ")*({$fy})))";
+            $animatedCrop = "crop=" . $outW . ":" . $outH . ":'{$cropX}':'{$cropY}'";
+
+            $vf = implode(',', [$coverScale, $animatedScale, $animatedCrop, 'setsar=1']);
+
+            return [
+                'ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                '-loop', '1',
+                '-i', $inputPath,
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-t', number_format($duration, 2, '.', ''),
+                '-vf', $vf,
+                '-r', (string)self::FPS,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '18',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-shortest',
+                '-movflags', '+faststart',
+                $outputPath,
+            ];
+        }
+
+        // Fallback for unexpected motion modes
+        throw new \RuntimeException('Unsupported photo motion mode: ' . $mode);
     }
 
     /**
@@ -639,7 +725,7 @@ class VideoRenderingService {
      *   clips     — the original $clips[] entries it was built from, in order
      *               (needed to pick the correct transition at the join point)
      */
-    private function runTransitionStitchPass(array $clips, string $outputPath, ?callable $onProgress = null, ?callable $onDebug = null): void {
+     private function runTransitionStitchPass(array $clips, string $outputPath, ?callable $onProgress = null, ?callable $onDebug = null): void {
         $count = count($clips);
         $tempDir = dirname($outputPath);
         $stepCounter = 0;
@@ -647,13 +733,16 @@ class VideoRenderingService {
         $totalMergeSteps = max(1, $count - 1);
  
         // Initialise the working set: each clip is its own segment.
+        // 'firstIndex' and 'lastIndex' are the global indices into $clips[],
+        // used to call pickTransitionSpec correctly at every merge level.
         $segments = [];
-        foreach ($clips as $clip) {
+        foreach ($clips as $globalIndex => $clip) {
             $segments[] = [
-                'path'     => (string)$clip['path'],
-                'duration' => (float)$clip['duration'],
-                'clips'    => [$clip],
-                'owned'    => false,   // original clip files are not ours to delete
+                'path'       => (string)$clip['path'],
+                'duration'   => (float)$clip['duration'],
+                'firstIndex' => $globalIndex,   // index of first clip in $clips[]
+                'lastIndex'  => $globalIndex,   // index of last clip in $clips[]
+                'owned'      => false,          // original clip files are not ours to delete
             ];
         }
  
@@ -672,20 +761,18 @@ class VideoRenderingService {
                 $left  = $segments[$j];
                 $right = $segments[$j + 1];
  
-                // The transition at the join point is determined by the last clip
-                // of the left segment and the first clip of the right segment.
-                // We use the original clip index in the global array for pickTransitionSpec.
-                $leftLastClip  = end($left['clips']);
-                $rightFirstClip = reset($right['clips']);
-                $globalRightIndex = array_search($rightFirstClip, $clips, true);
-                if ($globalRightIndex === false) {
-                    // Fallback: use count of left clips as a proxy index.
-                    $globalRightIndex = count($left['clips']);
-                }
+                // Transition is between the last clip of left and first clip of right.
+                // Use the stored global indices to look up the correct clip data.
+                $leftLastClip   = $clips[$left['lastIndex']];
+                $rightFirstClip = $clips[$right['firstIndex']];
+                // The index passed to pickTransitionSpec is the position of the
+                // right clip in the original sequence (used for round-robin variants).
+                $globalRightIndex = $right['firstIndex'];
  
-                $transitionSpec     = $this->pickTransitionSpec($leftLastClip, $rightFirstClip, (int)$globalRightIndex);
+                $transitionSpec     = $this->pickTransitionSpec($leftLastClip, $rightFirstClip, $globalRightIndex);
                 $transitionDuration = (float)$transitionSpec['duration'];
-                $offset             = max(0.0, $left['duration'] - $transitionDuration);
+                $leftRealDuration = $this->probeDuration($left['path'], 'precise');
+                $offset = max(0.0, $leftRealDuration - $transitionDuration);
  
                 $stepCounter++;
                 $isFinalMerge = (count($segments) === 2 && $j === 0);
@@ -764,24 +851,39 @@ class VideoRenderingService {
  
                 $this->runFfmpeg($cmd);
                 $completedMergeSteps++;
-
-                // Pass 2 stitching covers 56-90%.
+ 
+                // Pass 2 stitching covers 56–90%.
                 if ($onProgress) {
                     $stitchProgress = 55 + (int)round(($completedMergeSteps / $totalMergeSteps) * 35);
                     $onProgress(max(56, min(90, $stitchProgress)));
                 }
  
-                // Clean up temp files we own (not original clip files).
-                if ($left['owned'])  { @unlink($left['path']); }
-                if ($right['owned']) { @unlink($right['path']); }
+                // Clean up temp merge files only outside debug mode so
+                // intermediate stitch outputs remain inspectable when debugging.
+                if ($onDebug === null) {
+                    if ($left['owned']) {
+                        @unlink($left['path']);
+                    }
+                    if ($right['owned']) {
+                        @unlink($right['path']);
+                    }
+                }
  
-                $mergedDuration = $left['duration'] + $right['duration'] - $transitionDuration;
+                $mergedDuration = $this->probeDuration($mergedPath, 'precise');
  
+                if ($onDebug) {
+                    $this->logger->debug('Reel: completed merge step {n} → duration={d}s', [
+                        'n' => $stepCounter,
+                        'd' => number_format($mergedDuration, 3),
+                    ]);
+                }
+
                 $nextRound[] = [
-                    'path'     => $mergedPath,
-                    'duration' => $mergedDuration,
-                    'clips'    => array_merge($left['clips'], $right['clips']),
-                    'owned'    => true,
+                    'path'       => $mergedPath,
+                    'duration'   => $mergedDuration,
+                    'firstIndex' => $left['firstIndex'],   // leftmost clip index preserved
+                    'lastIndex'  => $right['lastIndex'],   // rightmost clip index preserved
+                    'owned'      => true,
                 ];
             }
  
@@ -789,6 +891,82 @@ class VideoRenderingService {
         }
  
         $this->logger->info('Reel: transition stitch pass complete ({n} merge steps)', ['n' => $stepCounter]);
+    }
+
+    private function probeDuration(string $path, string $mode = 'safe'): ?float
+    {
+        $cmds = [];
+
+        if ($mode === 'precise') {
+            // Try video stream duration first
+            $cmds[] = [
+                'args' => [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-select_streams', 'v:0',
+                    '-show_entries', 'stream=duration',
+                    '-of', 'csv=p=0',
+                    $path,
+                ],
+                'type' => 'precise',
+            ];
+        }
+
+        // Always add container duration as fallback / safe
+        $cmds[] = [
+            'args' => [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                $path,
+            ],
+            'type' => 'safe',
+        ];
+
+        foreach ($cmds as $cmdInfo) {
+            $cmd = $cmdInfo['args'];
+
+            $process = proc_open(
+                $cmd,
+                [
+                    0 => ['pipe', 'r'], // stdin
+                    1 => ['pipe', 'w'], // stdout
+                    2 => ['pipe', 'w'], // stderr
+                ],
+                $pipes
+            );
+
+            if (!is_resource($process)) {
+                continue; // try next command
+            }
+
+            fclose($pipes[0]); // no input needed
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+
+            $exitCode = proc_close($process);
+
+            if ($exitCode !== 0 || $stdout === false) {
+                if (!empty($stderr)) {
+                    $this->logger->debug(
+                        'Reel: ffprobe ({type}) duration failed: {err}',
+                        ['type' => $cmdInfo['type'], 'err' => trim($stderr)]
+                    );
+                }
+                continue; // try next command
+            }
+
+            $duration = (float)trim($stdout);
+            if ($duration > 0.0) {
+                return $duration;
+            }
+        }
+
+        // All attempts failed
+        return null;
     }
 
     /**
@@ -1154,6 +1332,7 @@ class VideoRenderingService {
             'output_orientation',
             'landscape_16_9',
         );
+
         $targetAspect = match ($outputOrientation) {
             'portrait_9_16' => 9.0 / 16.0,
             'square_1_1' => 1.0,
@@ -1193,7 +1372,7 @@ class VideoRenderingService {
                 $isVideo  = $useLive || (bool)$row['isvideo'];
                 $interestingFocus = $isVideo
                     ? null
-                    : $this->detectInterestingFocus($localPath);
+                    : $this->detectInterestingFocus($localPath, $onDebug);
 
                 $dims = $isVideo
                     ? ['w' => (int)($row['w'] ?? 0), 'h' => (int)($row['h'] ?? 0)]
@@ -1203,20 +1382,37 @@ class VideoRenderingService {
                         (int)($row['h'] ?? 0),
                     );
 
+                $groupPhoto = count($faceMap[$fileId] ?? []) > 3;
+                $isPanorama = ((int)$dims['w'] / (int)$dims['h']) > 2.5 || ((int)$dims['h'] / (int)$dims['w']) > 2.5;
+
                 if ($isVideo) {
                     $motion = [];
                     // Video/live clips are "breakers" that reset subtle run grouping.
                     $subtleRunMotion = null;
                     $subtleRunRemaining = 0;
+                } elseif ($groupPhoto || $isPanorama) {
+                        $motion = $this->buildPhotoMotion(
+                        $fileId,
+                        $faceMap[$fileId] ?? [],
+                        (int)$dims['w'],
+                        (int)$dims['h'],
+                        $interestingFocus,
+                        $this->getPanMismatchThreshold(),
+                        $this->getPanSweepMargin(),
+                        $this->getPanoramaSweepMargin(),
+                        $this->getFaceZoomTargetFill(),
+                        $this->getNonFaceZoomEnd(),
+                    );
+                    $motion['style'] = 'classic';
                 } else {
                     if ($subtleRunMotion === null || $subtleRunRemaining <= 0) {
-                        [$subtleRunMotion, $subtleRunRemaining] = $this->pickNextSubtleRun($lastSubtleRunMotion, (int)$row['file_id']);
+                        [$subtleRunMotion, $subtleRunRemaining] = $this->pickNextSubtleRun($lastSubtleRunMotion, $fileId);
                         $lastSubtleRunMotion = $subtleRunMotion;
                     }
 
                     $motion = $this->buildPhotoMotionSubtle(
-                        (int)$row['file_id'],
-                        $faceMap[(int)$row['file_id']] ?? [],
+                        $fileId,
+                        $faceMap[$fileId] ?? [],
                         (int)$dims['w'],
                         (int)$dims['h'],
                         $interestingFocus,
@@ -1225,9 +1421,7 @@ class VideoRenderingService {
                     $motion['style'] = 'apple_subtle';
                     $motion['run_motion'] = $subtleRunMotion;
                     $motion['run_remaining'] = $subtleRunRemaining;
-                    $dimW = (int)$dims['w'];
-                    $dimH = (int)$dims['h'];
-                    $motion['image_aspect'] = ($dimH > 0) ? ($dimW / $dimH) : $this->targetAspect();
+                    $motion['image_aspect'] = ((int)$dims['h'] > 0) ? ((int)$dims['w'] / (int)$dims['h']) : $this->targetAspect();
                     $subtleRunRemaining--;
                 }
 
@@ -1241,14 +1435,12 @@ class VideoRenderingService {
                 }
 
                 if ($onDebug) {
-                    $sourceW = (int)$dims['w'];
-                    $sourceH = (int)$dims['h'];
-                    $sourceAspect = $sourceH > 0 ? ($sourceW / $sourceH) : 0.0;
+                    $sourceAspect = (int)$dims['h'] > 0 ? ((int)$dims['w'] / (int)$dims['h']) : 0.0;
                     $msg = sprintf(
                         '  Motion debug: file_id=%d src=%dx%d aspect=%.4f',
-                        (int)$row['file_id'],
-                        $sourceW,
-                        $sourceH,
+                        $fileId,
+                        (int)$dims['w'],
+                        (int)$dims['h'],
                         $sourceAspect,
                     );
 
@@ -1299,7 +1491,7 @@ class VideoRenderingService {
 
     private function resolveVideoDuration(string $localPath, array $row, bool $isLive): float {
         $metadataDuration = (float)($row['video_duration'] ?? 0.0);
-        $probedDuration = $this->probeVideoDurationSeconds($localPath);
+        $probedDuration = $this->probeDuration($localPath);
 
         // For live photos, prefer real MOV metadata duration.
         // If probing fails, fall back to DB metadata and then a conservative default.
@@ -1312,7 +1504,7 @@ class VideoRenderingService {
                 return $this->clamp($metadataDuration, 0.6, self::MAX_CLIP_DURATION);
             }
 
-            return 2.8;
+            return 2.8; // Live photo with no valid duration info – use a reasonable default.
         }
 
         // Regular videos keep existing behavior but use probing as a fallback.
@@ -1371,47 +1563,6 @@ class VideoRenderingService {
         $start = min($start, $maxStart);
 
         return [$start, $length];
-    }
-
-    private function probeVideoDurationSeconds(string $localPath): ?float {
-        $cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $localPath,
-        ];
-
-        $process = proc_open(
-            $cmd,
-            [
-                0 => ['pipe', 'r'],
-                1 => ['pipe', 'w'],
-                2 => ['pipe', 'w'],
-            ],
-            $pipes
-        );
-
-        if (!is_resource($process)) {
-            return null;
-        }
-
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($process);
-
-        if ($exitCode !== 0 || $stdout === false) {
-            if (!empty($stderr)) {
-                $this->logger->debug('Reel: ffprobe duration failed: {err}', ['err' => trim($stderr)]);
-            }
-            return null;
-        }
-
-        $duration = (float)trim($stdout);
-        return $duration > 0.0 ? $duration : null;
     }
 
     private function buildPhotoMotionSubtle(
@@ -1588,10 +1739,49 @@ class VideoRenderingService {
             $zoomEnd = $this->clamp(min($targetZoom, $maxNoBlurZoom), 1.0, $maxNoBlurZoom);
             $groupFx = $this->clamp(($minX + $maxX) / 2.0, $safeMin, $safeMax);
             $groupFy = $this->clamp((($minY + $maxY) / 2.0) - 0.02, $safeMin, $safeMax);
+            $faceCount = count($faces);
 
             $extra = 0.0;
-            for ($k = 2; $k <= count($faces); $k++) {
+            for ($k = 2; $k <= $faceCount; $k++) {
                 $extra += (0.55 / ($k - 1));
+            }
+
+            $baseDuration = min(6.0, self::PHOTO_DURATION + min(2.6, $extra + 0.25));
+            $largeGroup = $faceCount >= 6;
+
+            if ($largeGroup) {
+                $travelX = $this->clamp(min($groupFx - $safeMin, $safeMax - $groupFx) * 0.70, 0.03, 0.10);
+                $travelY = $this->clamp(min($groupFy - $safeMin, $safeMax - $groupFy) * 0.70, 0.03, 0.10);
+                $preferHorizontal = $groupW >= $groupH;
+                $dirForward = ((($seed >> 9) & 1) === 0);
+
+                if ($preferHorizontal) {
+                    $fxStart = $this->clamp($groupFx + ($dirForward ? -$travelX : $travelX), $safeMin, $safeMax);
+                    $fxEnd = $this->clamp($groupFx + ($dirForward ? $travelX : -$travelX), $safeMin, $safeMax);
+
+                    return [
+                        'mode' => 'pan_x_zoom',
+                        'fx_start' => $fxStart,
+                        'fx_end' => $fxEnd,
+                        'fy' => $groupFy,
+                        'zoom_start' => max(1.0, $zoomEnd * 0.92),
+                        'zoom_end' => $zoomEnd,
+                        'duration' => min(6.2, $baseDuration + 0.7),
+                    ];
+                }
+
+                $fyStart = $this->clamp($groupFy + ($dirForward ? -$travelY : $travelY), $safeMin, $safeMax);
+                $fyEnd = $this->clamp($groupFy + ($dirForward ? $travelY : -$travelY), $safeMin, $safeMax);
+
+                return [
+                    'mode' => 'pan_y_zoom',
+                    'fx' => $groupFx,
+                    'fy_start' => $fyStart,
+                    'fy_end' => $fyEnd,
+                    'zoom_start' => max(1.0, $zoomEnd * 0.92),
+                    'zoom_end' => $zoomEnd,
+                    'duration' => min(6.2, $baseDuration + 0.7),
+                ];
             }
 
             return [
@@ -1599,7 +1789,7 @@ class VideoRenderingService {
                 'fy' => $groupFy,
                 'zoom_start' => 1.0,
                 'zoom_end' => $zoomEnd,
-                'duration' => min(5.0, self::PHOTO_DURATION + min(1.8, $extra)),
+                'duration' => $baseDuration,
             ];
         }
 
@@ -1621,6 +1811,9 @@ class VideoRenderingService {
             $sweepZoom = ($isPanoramaWide || $isPanoramaTall)
                 ? min($maxNoBlurZoom, $configuredPanoramaSweepZoom)
                 : min($maxNoBlurZoom, $configuredSweepZoom);
+            $sweepDuration = ($isPanoramaWide || $isPanoramaTall)
+                ? min(6.0, self::PHOTO_DURATION + 2.0)
+                : self::PHOTO_DURATION;
 
             if ($horizontalSweep) {
                 return [
@@ -1631,7 +1824,7 @@ class VideoRenderingService {
                     'fy' => $this->clamp((float)$mappedFocus['fy'], 0.14, 0.86),
                     'zoom_start' => 1.0,
                     'zoom_end' => $sweepZoom,
-                    'duration' => self::PHOTO_DURATION,
+                    'duration' => $sweepDuration,
                 ];
             }
 
@@ -1643,7 +1836,7 @@ class VideoRenderingService {
                 'fy_end' => $end,
                 'zoom_start' => 1.0,
                 'zoom_end' => $sweepZoom,
-                'duration' => self::PHOTO_DURATION,
+                'duration' => $sweepDuration,
             ];
         }
 
@@ -1747,11 +1940,37 @@ class VideoRenderingService {
         return $this->outputWidth() / max(1, $this->outputHeight());
     }
 
+    private function getPanMismatchThreshold(): float {
+        return self::PAN_MISMATCH_THRESHOLD_DEFAULT;
+    }
+
+    private function getPanSweepMargin(): float {
+        return self::PAN_SWEEP_MARGIN_DEFAULT;
+    }
+
+    private function getPanoramaSweepMargin(): float {
+        return self::PANORAMA_SWEEP_MARGIN_DEFAULT;
+    }
+
+    private function getFaceZoomTargetFill(): float {
+        return self::FACE_ZOOM_TARGET_FILL_DEFAULT;
+    }
+
+    private function getNonFaceZoomEnd(): float {
+        return self::NON_FACE_ZOOM_END_DEFAULT;
+    }
+
     /**
      * Lightweight saliency approximation: pick the highest-detail tile in a dense grid.
      */
-    private function detectInterestingFocus(string $localPath): ?array {
+    private function detectInterestingFocus(
+        string $localPath,
+        ?callable $onDebug = null
+        ): ?array {
         if (!class_exists(\Imagick::class)) {
+            if ($onDebug) {
+                $onDebug('Imagick class not found, cannot perform focus detection.');
+            }
             return null;
         }
 
@@ -1765,6 +1984,9 @@ class VideoRenderingService {
             $w = $img->getImageWidth();
             $h = $img->getImageHeight();
             if ($w < 3 || $h < 3) {
+                if ($onDebug) {
+                    $onDebug('Interesting image ' . $localPath . ' is too small for focus detection: ' . $w . 'x' . $h);
+                }
                 $img->destroy();
                 return null;
             }
@@ -1819,8 +2041,14 @@ class VideoRenderingService {
             }
 
             $img->destroy();
+            if ($onDebug) {
+                $onDebug('Interesting image ' . $localPath . ' area coordinates: fx=' . $bestFx . ', fy=' . $bestFy);
+            }
             return ['fx' => $bestFx, 'fy' => $bestFy];
         } catch (\Throwable $e) {
+            if ($onDebug) {
+                $onDebug('Error during focus detection: ' . $e->getMessage());
+            }
             return null;
         }
     }
@@ -1900,14 +2128,7 @@ class VideoRenderingService {
         return $bestFace;
     }
 
-    private function isStrongAspectMismatch(float $sourceAspect, float $targetAspect): bool {
-        if ($sourceAspect <= 0.0 || $targetAspect <= 0.0) {
-            return false;
-        }
 
-        $ratio = max($sourceAspect / $targetAspect, $targetAspect / $sourceAspect);
-        return $ratio >= 1.65;
-    }
 
     private function easeInOutCubicExpr(string $tExpr): string {
         return "if(lt({$tExpr},0.5),4*pow({$tExpr},3),1-pow(-2*{$tExpr}+2,3)/2)";
@@ -2081,11 +2302,22 @@ class VideoRenderingService {
         }
 
         if ($exitCode !== 0) {
+            $signaled = !empty($status['signaled']);
+            $termSig = (int)($status['termsig'] ?? 0);
+            $cmdString = implode(' ', array_map('strval', $cmd));
             $this->logger->error('Reel: FFmpeg failed (exit {code}): {stderr}', [
                 'code'   => $exitCode,
                 'stderr' => $stderr,
+                'signaled' => $signaled,
+                'term_signal' => $termSig,
+                'close_code' => $closeCode,
+                'cmd' => mb_substr($cmdString, 0, 4000),
             ]);
-            throw new \RuntimeException("FFmpeg exited with code {$exitCode}: " . substr($stderr, -500));
+
+            $reason = $signaled && $termSig > 0
+                ? " (terminated by signal {$termSig})"
+                : '';
+            throw new \RuntimeException("FFmpeg exited with code {$exitCode}{$reason}: " . substr($stderr, -500));
         }
     }
 
