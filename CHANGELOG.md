@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Fixed
+
+## [2.1.0] - 2026-04-21
+
+### Added
 - Event detection: new Tier A triptych optimizer (`TriptychOptimizerService`) that runs after duplicate and distinct filtering. It intelligently re-enables deselected media to create valid triptych segments in rendered videos, increasing visual variety without affecting total video length. The optimizer uses a 4-strategy approach: checks previous 2 items, previous 1 + next 1, next 2 items, or smart re-enable combinations within temporal proximity.
 - Developer docs: added project-level `AGENTS.md` with architecture, build/test, and coding conventions for contributors and coding agents.
 
